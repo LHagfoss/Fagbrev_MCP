@@ -2,7 +2,7 @@
 
 Fagbrev MCP lets an AI assistant read and manage your own Fagbrev.io apprenticeship dashboard.
 
-It is a local Rust program. It uses a separate Chrome profile for your Fagbrev login and talks to an MCP client over `stdio` (standard input/output). It does not run a public web server.
+It is a local Rust program. It uses a separate Chrome profile for your Fagbrev login and talks to an MCP client over `stdio` (standard input/output), or optionally over local Streamable HTTP.
 
 ## Quick start
 
@@ -10,9 +10,12 @@ It is a local Rust program. It uses a separate Chrome profile for your Fagbrev l
 cargo run -- login    # opens Chrome; log in normally
 cargo run -- status   # print a small dashboard summary
 cargo run -- mcp      # start the MCP server for your MCP client
+cargo run -- http     # optional HTTP server at http://127.0.0.1:3030/mcp
 ```
 
 The login profile is stored in your operating system's application-data folder, outside this repository. Your password, cookies, and tokens are never printed or committed.
+
+The `mcp` command is the normal local stdio mode. Use `http` when an MCP client needs a URL. It binds only to `127.0.0.1:3030` by default. You can choose another IP and port with `--host` and `--port`, for example `cargo run -- http --host 127.0.0.1 --port 8787`. Supplying a non-loopback host explicitly can expose your data to the network, so only do that deliberately. The HTTP endpoint is `/mcp` and has no built-in authentication.
 
 ## How it works
 
