@@ -12,7 +12,7 @@ use rmcp::{
 use serde::{Deserialize, Serialize};
 
 use crate::browser;
-use crate::data::DocumentationStatus;
+use crate::data::{DocumentationStatus, DocumentationTarget};
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -71,6 +71,39 @@ pub struct DocumentationListRequest {
 pub struct DocumentationRequest {
     /// The real document ID copied from a /l/dokumentasjon/{id} link.
     pub document_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ReusableContentRequest {
+    /// New competency goal/delmål target to compare against.
+    pub target: DocumentationTarget,
+    /// Optional terms to require in source text in addition to target overlap.
+    #[serde(default)]
+    pub query: Option<String>,
+    /// Optional allow-list of source documentation IDs.
+    #[serde(default)]
+    pub source_documentation_ids: Option<Vec<String>>,
+    /// Optional source status filter.
+    #[serde(default)]
+    pub source_status: Option<DocumentationStatus>,
+    /// Optional maximum number of returned suggestions.
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DocumentationTemplateRequest {
+    /// Target competency goal/delmål for the local draft.
+    pub target: DocumentationTarget,
+    /// Optional title for the local draft.
+    #[serde(default)]
+    pub title: Option<String>,
+    /// Existing documentation IDs to include as clearly marked reference material.
+    #[serde(default)]
+    pub source_documentation_ids: Vec<String>,
+    /// Optional instructions to place above the draft scaffold.
+    #[serde(default)]
+    pub extra_instructions: Option<String>,
 }
 
 #[tool_router]
@@ -208,6 +241,55 @@ impl FagbrevServer {
             Err(error) => CallToolResult::error(vec![rmcp::model::ContentBlock::text(format!(
                 "Could not read documentation: {error:#}"
             ))]),
+        }
+    }
+
+    /// Find existing learner documentation that may be useful reference material.
+    #[tool(
+        name = "find_reusable_content",
+        description = "Find explainable local text-overlap suggestions from existing Fagbrev.io documentation for a target. Read-only; never copies or submits content."
+    )]
+    async fn find_reusable_content(
+        &self,
+        Parameters(request): Parameters<ReusableContentRequest>,
+    ) -> String {
+        match crate::reuse::find_reusable_content(
+            request.target,
+            request.query,
+            request.source_documentation_ids,
+            request.source_status,
+            request.limit,
+        )
+        .await
+        {
+            Ok(result) => serde_json::to_string_pretty(&result).unwrap_or_else(|error| {
+                format!("Could not serialize reusable-content matches: {error}")
+            }),
+            Err(error) => format!("Could not find reusable content: {error:#}"),
+        }
+    }
+
+    /// Assemble a local draft from selected records without saving it.
+    #[tool(
+        name = "make_documentation_template",
+        description = "Create a local reviewable documentation template from selected existing records. Includes marked source content and warnings; never saves, uploads, submits, or requests approval."
+    )]
+    async fn make_documentation_template(
+        &self,
+        Parameters(request): Parameters<DocumentationTemplateRequest>,
+    ) -> String {
+        match crate::reuse::make_documentation_template(
+            request.target,
+            request.title,
+            request.source_documentation_ids,
+            request.extra_instructions,
+        )
+        .await
+        {
+            Ok(template) => serde_json::to_string_pretty(&template).unwrap_or_else(|error| {
+                format!("Could not serialize documentation template: {error}")
+            }),
+            Err(error) => format!("Could not make documentation template: {error:#}"),
         }
     }
 }

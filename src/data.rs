@@ -244,6 +244,17 @@ pub struct ReusableContentMatch {
     pub reasons: Vec<String>,
 }
 
+/// Result of a local reusable-content search. Warnings explain skipped
+/// sources or the limits of deterministic text matching.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ReusableContentSearch {
+    pub target: DocumentationTarget,
+    #[serde(default)]
+    pub matches: Vec<ReusableContentMatch>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
 /// Local draft output for a documentation entry. It is not a submission.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
