@@ -31,7 +31,7 @@ Fagbrev.io
 structured JSON returned to the MCP client
 ```
 
-The server is currently stateless between tool calls except for the saved browser authentication profile. The AI client owns conversational context. Cross-tool context is passed using stable document IDs, explicit `DocumentationTarget` values, and source-documentation ID lists.
+The server has no hidden conversation memory. It keeps the saved browser authentication profile and explicitly saved local drafts. Cross-tool context is passed using stable document IDs, explicit `DocumentationTarget` values, local draft IDs, and source-documentation ID lists.
 
 ## Tool groups
 
@@ -41,6 +41,8 @@ The server is currently stateless between tool calls except for the saved browse
 - Learning plan: `list_competency_goals`, `get_competency_goal`, `list_delmal`, `get_delmal`
 - Documentation: `list_documentation`, `get_documentation`
 - Local composition: `find_reusable_content`, `make_documentation_template`
+- Local drafts: `save_draft`, `list_drafts`, `get_draft`, `update_draft`, `delete_draft`
+- Bounded assembly: `get_context_bundle`
 - Half-year tasks and feedback are read-only tools exposed by the current main branch.
 
 Read tools should return normalized models from `src/data.rs`, not raw browser HTML. Raw page text is for diagnostics and should eventually be limited to `inspect`.
@@ -53,6 +55,10 @@ Every mutating workflow requires an explicit `confirm: true`. With confirmation 
 
 The Fagbrev new-documentation form has an important side effect: opening it can create a blank draft. Treat opening that form as a mutation and keep it behind the same confirmation boundary.
 
+Local draft operations are different: they only read or atomically replace JSON files below the OS application-data directory's `drafts/` folder. A `LocalDraft` contains a generated local `draft_id`, title/content, target, source documentation IDs, version, timestamps, and `status: local_only`. It never contains browser profile data, credentials, cookies, or Firebase tokens. `save_draft` creates a draft when `draft_id` is omitted and updates one when its exact `expected_version` is supplied. `update_draft` always requires that version. `list_drafts` returns bounded summaries without content; `delete_draft` removes only the validated local file.
+
+The draft fields are deliberately compatible with `submit_documentation`, but no draft tool submits automatically. A caller must explicitly read/review the draft and pass its data to the separately confirmation-gated Fagbrev write tool.
+
 ## Context model
 
 There are three different kinds of context:
@@ -61,7 +67,7 @@ There are three different kinds of context:
 2. Conversation context: the MCP host/AI client remembers previous tool results.
 3. Domain context: tool arguments and results carry `DocumentationTarget`, document IDs, delmål ordinals, source IDs, warnings, and statuses.
 
-The current server does not persist local drafts or conversation history. A future draft store should use a local `draft_id`, version number, target, source IDs, and content, with no credentials. Context bundles should be bounded so a whole documentation archive is not injected into every model turn.
+`get_context_bundle` is an explicit snapshot, not memory. It always attempts current dashboard/status reads, optionally includes one selected competency goal and its delmål, and includes at most five documentation summaries by default (maximum twenty). Passing explicit `document_ids` allows selected details; `include_document_content` must also be true before selected document content is returned. The response includes `retrieved_at`, source URLs, applied limits, and warnings. It never injects the whole archive by default.
 
 ## Identity and safety rules
 

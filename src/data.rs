@@ -202,7 +202,7 @@ pub struct DashboardStatus {
     pub documentation_counts: DocumentationCounts,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct DashboardOverview {
     pub authenticated: bool,
     pub page_title: String,
@@ -395,6 +395,113 @@ pub struct RequestApprovalResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<DocumentationStatus>,
     pub message: String,
+}
+
+/// A draft stored by this MCP locally. It is never uploaded to Fagbrev.io.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct LocalDraft {
+    pub draft_id: String,
+    pub title: String,
+    pub content: String,
+    pub target: DocumentationTarget,
+    #[serde(default)]
+    pub source_documentation_ids: Vec<String>,
+    pub version: u64,
+    pub created_at: String,
+    pub updated_at: String,
+    pub status: LocalDraftStatus,
+}
+
+/// The explicit status prevents a local draft from being confused with a
+/// Fagbrev documentation record.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalDraftStatus {
+    LocalOnly,
+}
+
+/// Bounded list representation that intentionally omits draft content.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct LocalDraftSummary {
+    pub draft_id: String,
+    pub title: String,
+    pub target: DocumentationTarget,
+    #[serde(default)]
+    pub source_documentation_ids: Vec<String>,
+    pub version: u64,
+    pub created_at: String,
+    pub updated_at: String,
+    pub status: LocalDraftStatus,
+    pub content_length: usize,
+}
+
+impl From<&LocalDraft> for LocalDraftSummary {
+    fn from(draft: &LocalDraft) -> Self {
+        Self {
+            draft_id: draft.draft_id.clone(),
+            title: draft.title.clone(),
+            target: draft.target.clone(),
+            source_documentation_ids: draft.source_documentation_ids.clone(),
+            version: draft.version,
+            created_at: draft.created_at.clone(),
+            updated_at: draft.updated_at.clone(),
+            status: draft.status,
+            content_length: draft.content.chars().count(),
+        }
+    }
+}
+
+/// Result of creating or updating a local draft.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct DraftWriteResult {
+    pub outcome: String,
+    pub local_only: bool,
+    pub draft: LocalDraft,
+    pub message: String,
+}
+
+/// Result of deleting a local draft. This operation never touches Fagbrev.io.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct DraftDeleteResult {
+    pub outcome: String,
+    pub draft_id: String,
+    pub local_only: bool,
+    pub deleted: bool,
+    pub message: String,
+}
+
+/// The selected learning-plan slice included in a context bundle.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct LearningPlanContext {
+    pub goal_number: u8,
+    pub title: Option<String>,
+    pub status_count: Option<u32>,
+    #[serde(default)]
+    pub delmal: Vec<Delmal>,
+}
+
+/// Limits applied to a context bundle, so callers can see exactly what was
+/// and was not included in the response.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct ContextBundleLimits {
+    pub max_documents: u32,
+    pub include_document_content: bool,
+    pub selected_document_ids: bool,
+}
+
+/// Explicit, bounded context assembled from current Fagbrev reads.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct ContextBundle {
+    pub retrieved_at: String,
+    pub source_urls: Vec<String>,
+    pub limits: ContextBundleLimits,
+    pub dashboard: Option<DashboardOverview>,
+    pub status: Option<DashboardStatus>,
+    pub learning_plan: Option<LearningPlanContext>,
+    #[serde(default)]
+    pub documentation: Vec<DocumentationRecord>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 #[cfg(test)]

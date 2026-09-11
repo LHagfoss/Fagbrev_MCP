@@ -1,6 +1,8 @@
 mod browser;
 mod cli;
+mod context;
 mod data;
+mod drafts;
 mod mcp;
 mod reuse;
 
