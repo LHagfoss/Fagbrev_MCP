@@ -243,9 +243,10 @@ pub struct ContextBundleRequest {
 const NEW_FORM_WARNING: &str = "Opening the new documentation form may create a blank draft. No form is opened and no browser data is changed until confirm=true.";
 
 fn json_success<T: Serialize>(value: &T) -> CallToolResult {
-    CallToolResult::success(vec![rmcp::model::ContentBlock::text(
-        serde_json::to_string_pretty(value).unwrap_or_else(|error| error.to_string()),
-    )])
+    match serde_json::to_string_pretty(value) {
+        Ok(json) => CallToolResult::success(vec![rmcp::model::ContentBlock::text(json)]),
+        Err(error) => json_error(format!("Could not serialize tool result: {error}")),
+    }
 }
 
 fn json_error(error: impl std::fmt::Display) -> CallToolResult {
@@ -353,11 +354,10 @@ impl FagbrevServer {
         name = "get_dashboard_overview",
         description = "Read the current user's Fagbrev.io dashboard overview. Read-only."
     )]
-    async fn get_dashboard_overview(&self) -> String {
+    async fn get_dashboard_overview(&self) -> CallToolResult {
         match browser::dashboard_overview().await {
-            Ok(overview) => serde_json::to_string_pretty(&overview)
-                .unwrap_or_else(|error| format!("Could not serialize dashboard: {error}")),
-            Err(error) => format!("Could not read dashboard: {error:#}"),
+            Ok(overview) => json_success(&overview),
+            Err(error) => json_error(format!("Could not read dashboard: {error:#}")),
         }
     }
 
@@ -366,11 +366,10 @@ impl FagbrevServer {
         name = "get_status",
         description = "Read the current user's Fagbrev.io progress and documentation status summary. Read-only; unavailable percentages remain null."
     )]
-    async fn get_status(&self) -> String {
+    async fn get_status(&self) -> CallToolResult {
         match browser::dashboard_overview().await {
-            Ok(overview) => serde_json::to_string_pretty(&overview.status())
-                .unwrap_or_else(|error| format!("Could not serialize status: {error}")),
-            Err(error) => format!("Could not read status: {error:#}"),
+            Ok(overview) => json_success(&overview.status()),
+            Err(error) => json_error(format!("Could not read status: {error:#}")),
         }
     }
 
@@ -379,11 +378,10 @@ impl FagbrevServer {
         name = "list_competency_goals",
         description = "List the user's 21 Fagbrev.io competency goals with their visible status counts. Read-only."
     )]
-    async fn list_competency_goals(&self) -> String {
+    async fn list_competency_goals(&self) -> CallToolResult {
         match browser::list_competency_goals().await {
-            Ok(goals) => serde_json::to_string_pretty(&goals)
-                .unwrap_or_else(|error| format!("Could not serialize competency goals: {error}")),
-            Err(error) => format!("Could not read competency goals: {error:#}"),
+            Ok(goals) => json_success(&goals),
+            Err(error) => json_error(format!("Could not read competency goals: {error:#}")),
         }
     }
 
@@ -417,11 +415,13 @@ impl FagbrevServer {
         name = "list_delmal",
         description = "List selectable Fagbrev.io delmål, optionally filtered by parent competency goal. IDs and statuses remain null unless the UI exposes them. Read-only."
     )]
-    async fn list_delmal(&self, Parameters(request): Parameters<DelmalListRequest>) -> String {
+    async fn list_delmal(
+        &self,
+        Parameters(request): Parameters<DelmalListRequest>,
+    ) -> CallToolResult {
         match browser::list_delmal(request.goal_number).await {
-            Ok(delmal) => serde_json::to_string_pretty(&delmal)
-                .unwrap_or_else(|error| format!("Could not serialize delmål: {error}")),
-            Err(error) => format!("Could not read delmål: {error:#}"),
+            Ok(delmal) => json_success(&delmal),
+            Err(error) => json_error(format!("Could not read delmål: {error:#}")),
         }
     }
 
@@ -446,11 +446,10 @@ impl FagbrevServer {
         name = "list_half_year_tasks",
         description = "List the six read-only Fagbrev.io half-year assignment and minifagprøve areas with their visible task text and documentation counts. Ordinals are UI-local."
     )]
-    async fn list_half_year_tasks(&self) -> String {
+    async fn list_half_year_tasks(&self) -> CallToolResult {
         match browser::list_half_year_tasks().await {
-            Ok(tasks) => serde_json::to_string_pretty(&tasks)
-                .unwrap_or_else(|error| format!("Could not serialize half-year tasks: {error}")),
-            Err(error) => format!("Could not read half-year tasks: {error:#}"),
+            Ok(tasks) => json_success(&tasks),
+            Err(error) => json_error(format!("Could not read half-year tasks: {error:#}")),
         }
     }
 
@@ -481,7 +480,7 @@ impl FagbrevServer {
     async fn list_documentation(
         &self,
         Parameters(request): Parameters<DocumentationListRequest>,
-    ) -> String {
+    ) -> CallToolResult {
         match browser::list_documentation(
             request.page.unwrap_or(1),
             request.page_size.unwrap_or(6),
@@ -490,9 +489,8 @@ impl FagbrevServer {
         )
         .await
         {
-            Ok(page) => serde_json::to_string_pretty(&page)
-                .unwrap_or_else(|error| format!("Could not serialize documentation: {error}")),
-            Err(error) => format!("Could not read documentation: {error:#}"),
+            Ok(page) => json_success(&page),
+            Err(error) => json_error(format!("Could not read documentation: {error:#}")),
         }
     }
 
@@ -521,11 +519,13 @@ impl FagbrevServer {
         name = "list_feedback",
         description = "List feedback entries visible on one authenticated Fagbrev.io documentation detail page. Feedback ordinals are UI-local and no private profile data is collected. Read-only."
     )]
-    async fn list_feedback(&self, Parameters(request): Parameters<FeedbackListRequest>) -> String {
+    async fn list_feedback(
+        &self,
+        Parameters(request): Parameters<FeedbackListRequest>,
+    ) -> CallToolResult {
         match browser::list_feedback(&request.document_id).await {
-            Ok(feedback) => serde_json::to_string_pretty(&feedback)
-                .unwrap_or_else(|error| format!("Could not serialize feedback: {error}")),
-            Err(error) => format!("Could not read feedback: {error:#}"),
+            Ok(feedback) => json_success(&feedback),
+            Err(error) => json_error(format!("Could not read feedback: {error:#}")),
         }
     }
 
@@ -556,7 +556,7 @@ impl FagbrevServer {
     async fn find_reusable_content(
         &self,
         Parameters(request): Parameters<ReusableContentRequest>,
-    ) -> String {
+    ) -> CallToolResult {
         match crate::reuse::find_reusable_content(
             request.target,
             request.query,
@@ -566,10 +566,8 @@ impl FagbrevServer {
         )
         .await
         {
-            Ok(result) => serde_json::to_string_pretty(&result).unwrap_or_else(|error| {
-                format!("Could not serialize reusable-content matches: {error}")
-            }),
-            Err(error) => format!("Could not find reusable content: {error:#}"),
+            Ok(result) => json_success(&result),
+            Err(error) => json_error(format!("Could not find reusable content: {error:#}")),
         }
     }
 
@@ -581,7 +579,7 @@ impl FagbrevServer {
     async fn make_documentation_template(
         &self,
         Parameters(request): Parameters<DocumentationTemplateRequest>,
-    ) -> String {
+    ) -> CallToolResult {
         match crate::reuse::make_documentation_template(
             request.target,
             request.title,
@@ -590,10 +588,8 @@ impl FagbrevServer {
         )
         .await
         {
-            Ok(template) => serde_json::to_string_pretty(&template).unwrap_or_else(|error| {
-                format!("Could not serialize documentation template: {error}")
-            }),
-            Err(error) => format!("Could not make documentation template: {error:#}"),
+            Ok(template) => json_success(&template),
+            Err(error) => json_error(format!("Could not make documentation template: {error:#}")),
         }
     }
 
@@ -654,11 +650,13 @@ impl FagbrevServer {
         name = "list_drafts",
         description = "List local-only documentation draft summaries. Content is omitted and the result is capped at 100 drafts. Never contacts Fagbrev.io."
     )]
-    async fn list_drafts(&self, Parameters(request): Parameters<DraftListRequest>) -> String {
+    async fn list_drafts(
+        &self,
+        Parameters(request): Parameters<DraftListRequest>,
+    ) -> CallToolResult {
         match drafts::DraftStore::from_app_data().and_then(|store| store.list(request.limit)) {
-            Ok(drafts) => serde_json::to_string_pretty(&drafts)
-                .unwrap_or_else(|error| format!("Could not serialize drafts: {error}")),
-            Err(error) => format!("Could not list local drafts: {error:#}"),
+            Ok(drafts) => json_success(&drafts),
+            Err(error) => json_error(format!("Could not list local drafts: {error:#}")),
         }
     }
 
@@ -960,10 +958,11 @@ pub async fn serve() -> Result<()> {
 mod tests {
     use super::{
         DeleteDocumentationRequest, RequestApprovalRequest, SubmitDocumentationRequest,
-        UpdateDocumentationRequest, approval_preview, delete_preview, submit_preview,
-        update_preview,
+        UpdateDocumentationRequest, approval_preview, delete_preview, json_error, json_success,
+        submit_preview, update_preview,
     };
     use crate::data::{CompetencyGoalReference, Delmal, DocumentationStatus, DocumentationTarget};
+    use serde::Serializer;
 
     fn target() -> DocumentationTarget {
         DocumentationTarget {
@@ -981,6 +980,49 @@ mod tests {
                 status_count: None,
             }),
         }
+    }
+
+    #[test]
+    fn json_results_mark_errors_without_changing_success_text() {
+        let success = json_success(&serde_json::json!({"count": 2}));
+        assert_eq!(success.is_error, Some(false));
+        assert_eq!(
+            success.content[0].as_text().expect("text content").text,
+            "{\n  \"count\": 2\n}"
+        );
+
+        let error = json_error("could not read dashboard");
+        assert_eq!(error.is_error, Some(true));
+        assert_eq!(
+            error.content[0].as_text().expect("text content").text,
+            "could not read dashboard"
+        );
+    }
+
+    #[test]
+    fn serialization_failures_are_mcp_errors() {
+        struct FailingSerialization;
+
+        impl serde::Serialize for FailingSerialization {
+            fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: Serializer,
+            {
+                Err(serde::ser::Error::custom(
+                    "intentional serialization failure",
+                ))
+            }
+        }
+
+        let result = json_success(&FailingSerialization);
+        assert_eq!(result.is_error, Some(true));
+        assert!(
+            result.content[0]
+                .as_text()
+                .expect("text content")
+                .text
+                .contains("intentional serialization failure")
+        );
     }
 
     #[test]
