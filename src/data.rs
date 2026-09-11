@@ -95,6 +95,50 @@ pub struct DocumentationRecord {
     pub attachments: Vec<DocumentationAttachment>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_summary: Option<DocumentationTargetSummary>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub feedback: Vec<FeedbackRecord>,
+}
+
+/// A compact reference to documentation linked from a plan item.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct LinkedDocumentationSummary {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<DocumentationStatus>,
+}
+
+/// One expandable area on the half-year-assignments training-plan tab.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct HalfYearTask {
+    /// UI-local ordinal, 1 through 6; not a Firebase ID.
+    pub ordinal: u8,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<DocumentationStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub documentation_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub linked_documentation: Vec<LinkedDocumentationSummary>,
+}
+
+/// One feedback entry rendered on a documentation detail page.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct FeedbackRecord {
+    /// UI-local ordinal within the document, newest first; not a backend ID.
+    pub ordinal: u32,
+    pub document_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<DocumentationStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<String>,
+    pub text: String,
 }
 
 /// A file attached to a documentation record. The UI does not always expose

@@ -15,13 +15,22 @@ use tokio::time::{sleep, timeout};
 use crate::data::{
     CompetencyGoal, CompetencyGoalDetails, CompetencyGoalReference, DashboardOverview, Delmal,
     DocumentationAttachment, DocumentationPage, DocumentationRecord, DocumentationStatus,
-    DocumentationTarget, DocumentationTargetSummary, RequestApprovalResult,
+    DocumentationTarget, DocumentationTargetSummary, FeedbackRecord, HalfYearTask,
+    LinkedDocumentationSummary, RequestApprovalResult,
 };
 
 const FAGBREV_URL: &str = "https://fagbrev.io/l";
 const PLAN_URL: &str = "https://fagbrev.io/l/laereplanmal";
 const DOCUMENTATION_URL: &str = "https://fagbrev.io/l/dokumentasjon";
 const LOGIN_WAIT: Duration = Duration::from_secs(10 * 60);
+const HALF_YEAR_TASK_TITLES: [&str; 6] = [
+    "Etikk, lovverk og yrkesutøvelse",
+    "Kodeferdigheter og metode",
+    "Sikkerhet og personvern",
+    "Infrastruktur og arkitektur",
+    "Design, interaksjon og brukerdialog",
+    "Minifagprøve",
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PageSnapshot {
@@ -65,6 +74,29 @@ struct DocumentationDetailSnapshot {
     content_html: Option<String>,
     attachments: Vec<DocumentationAttachment>,
     target_text: Option<String>,
+    feedback: Vec<FeedbackSnapshot>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct FeedbackSnapshot {
+    status_label: Option<String>,
+    status_icon: Option<String>,
+    status_color: Option<String>,
+    author: Option<String>,
+    timestamp: Option<String>,
+    text: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct HalfYearTaskSnapshot {
+    ordinal: u8,
+    title: String,
+    task_text: Option<String>,
+    status_label: Option<String>,
+    status_icon: Option<String>,
+    status_color: Option<String>,
+    documentation_count: Option<u32>,
+    linked_documentation: Vec<LinkedDocumentationSummary>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -239,6 +271,59 @@ fn documentation_status_from_ui(
     DocumentationStatus::Unknown
 }
 
+fn parse_feedback(document_id: &str, entries: Vec<FeedbackSnapshot>) -> Vec<FeedbackRecord> {
+    entries
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, entry)| {
+            let text = entry.text.trim().to_string();
+            (!text.is_empty()).then_some(FeedbackRecord {
+                ordinal: index as u32 + 1,
+                document_id: document_id.to_string(),
+                status: Some(documentation_status_from_ui(
+                    entry.status_label.as_deref(),
+                    entry.status_icon.as_deref(),
+                    entry.status_color.as_deref(),
+                ))
+                .filter(|status| *status != DocumentationStatus::Unknown),
+                author: entry
+                    .author
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty()),
+                timestamp: entry
+                    .timestamp
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty()),
+                text,
+            })
+        })
+        .collect()
+}
+
+fn parse_half_year_tasks(entries: Vec<HalfYearTaskSnapshot>) -> Vec<HalfYearTask> {
+    entries
+        .into_iter()
+        .map(|entry| {
+            let status = documentation_status_from_ui(
+                entry.status_label.as_deref(),
+                entry.status_icon.as_deref(),
+                entry.status_color.as_deref(),
+            );
+            HalfYearTask {
+                ordinal: entry.ordinal,
+                title: entry.title,
+                task_text: entry
+                    .task_text
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty()),
+                status: (status != DocumentationStatus::Unknown).then_some(status),
+                documentation_count: entry.documentation_count,
+                linked_documentation: entry.linked_documentation,
+            }
+        })
+        .collect()
+}
+
 fn parse_documentation_rows(rows: Vec<DocumentationRowSnapshot>) -> Vec<DocumentationRecord> {
     rows.into_iter()
         .map(|row| DocumentationRecord {
@@ -328,7 +413,7 @@ fn documentation_record_from_detail(
     snapshot: DocumentationDetailSnapshot,
 ) -> DocumentationRecord {
     DocumentationRecord {
-        id: Some(id),
+        id: Some(id.clone()),
         url: Some(url),
         title: snapshot.title,
         content: snapshot
@@ -345,6 +430,7 @@ fn documentation_record_from_detail(
         updated_at: snapshot.updated_at,
         attachments: snapshot.attachments,
         target_summary: parse_target_summary(snapshot.target_text.as_deref()),
+        feedback: parse_feedback(&id, snapshot.feedback),
         ..DocumentationRecord::default()
     }
 }
@@ -408,6 +494,105 @@ async fn plan_page(
         bail!("attached browser is not on the læreplan page; navigate there first");
     }
     Ok(session)
+}
+
+async fn half_year_page(
+    headful: bool,
+) -> Result<(
+    Browser,
+    tokio::task::JoinHandle<()>,
+    chromiumoxide::Page,
+    bool,
+)> {
+    let session = plan_page(headful).await?;
+    wait_for_text(&session.2, "HALVÅRSOPPGAVER").await?;
+    let selected = session
+        .2
+        .evaluate(
+            "() => { const tab = Array.from(document.querySelectorAll('[role=\"tab\"], button')).find(element => (element.textContent || '').replace(/\\s+/g, ' ').toLowerCase().includes('halvårsoppgaver')); if (!tab) return false; if (tab.getAttribute('aria-selected') !== 'true') tab.click(); return true; }",
+        )
+        .await?
+        .into_value::<bool>()?;
+    if !selected {
+        let current = page_snapshot(&session.2).await?;
+        finish(session.0, session.1, session.3).await?;
+        bail!(
+            "could not find the half-year assignments tab on {} ({})",
+            current.url,
+            current.title
+        );
+    }
+    let snapshot = wait_for_text(&session.2, "Minifagprøve").await?;
+    if !snapshot.text.contains("Minifagprøve") {
+        finish(session.0, session.1, session.3).await?;
+        bail!("the half-year assignments tab did not finish loading");
+    }
+    Ok(session)
+}
+
+async fn half_year_tasks_snapshot(page: &chromiumoxide::Page) -> Result<Vec<HalfYearTaskSnapshot>> {
+    let titles = serde_json::to_string(&HALF_YEAR_TASK_TITLES)?;
+    page.evaluate(format!(
+        r#"() => {{
+            const titles = {titles};
+            const normalize = value => (value || '').replace(/\s+/g, ' ').trim();
+            const buttons = Array.from(document.querySelectorAll('main button.FExpantion-trigger'));
+            titles.forEach(expected => {{
+                const button = buttons.find(candidate => {{
+                    const heading = candidate.querySelector('.FExpantion-header');
+                    const title = normalize((heading?.innerText || candidate.innerText).replace(/^\s*\d+\s*/, ''));
+                    return title === expected;
+                }});
+                if (button && !button.parentElement?.querySelector('.FExpantion-arrow-open')) button.click();
+            }});
+            return true;
+        }}"#
+    ))
+    .await?
+    .into_value::<bool>()?;
+    sleep(Duration::from_millis(400)).await;
+    page.evaluate(format!(
+        r#"() => {{
+            const titles = {titles};
+            const normalize = value => (value || '').replace(/\s+/g, ' ').trim();
+            const buttons = Array.from(document.querySelectorAll('main button.FExpantion-trigger'));
+            return titles.map((expected, index) => {{
+                const button = buttons.find(candidate => {{
+                    const heading = candidate.querySelector('.FExpantion-header');
+                    const title = normalize((heading?.innerText || candidate.innerText).replace(/^\s*\d+\s*/, ''));
+                    return title === expected;
+                }});
+                if (!button) return null;
+                const root = button.parentElement;
+                const heading = button.querySelector('.FExpantion-header');
+                const title = normalize((heading?.innerText || button.innerText).replace(/^\s*\d+\s*/, ''));
+                const statusIcon = root?.querySelector('.FExpantion-header i[data-name], .FExpantion-header i[data-type]');
+                const documentationButton = Array.from(root?.querySelectorAll('button') || [])
+                    .find(candidate => normalize(candidate.innerText).startsWith('Se tilknyttede dokumentasjoner'));
+                const documentationMatch = documentationButton?.innerText.match(/\((\d+)\)/);
+                const editor = root?.querySelector('.FExpantion-content .ql-editor');
+                const linked = Array.from(root?.querySelectorAll('a[href^="/l/dokumentasjon/"]') || [])
+                    .map(anchor => {{
+                        const href = anchor.getAttribute('href');
+                        const match = href?.match(/^\/l\/dokumentasjon\/([^/?#]+)$/);
+                        return {{ id: match ? match[1] : null, title: normalize(anchor.innerText) || null, status: null }};
+                    }});
+                return {{
+                    ordinal: index + 1,
+                    title,
+                    task_text: editor?.innerText?.trim() || null,
+                    status_label: null,
+                    status_icon: statusIcon?.getAttribute('data-name') || statusIcon?.getAttribute('data-type') || null,
+                    status_color: null,
+                    documentation_count: documentationMatch ? Number(documentationMatch[1]) : null,
+                    linked_documentation: linked
+                }};
+            }}).filter(Boolean);
+        }}"#
+    ))
+    .await?
+    .into_value()
+    .map_err(Into::into)
 }
 
 fn parse_goals_from_page_text(text: &str) -> Vec<CompetencyGoal> {
@@ -698,6 +883,21 @@ async fn documentation_detail_snapshot(
             const targetButton = Array.from(main?.querySelectorAll('button') || [])
                 .find(button => button.innerText.trim().startsWith('Se kompetansemål'));
             const targetPanel = targetButton?.closest('.FExpantion');
+            const feedbackCard = Array.from(main?.querySelectorAll('.vcard') || [])
+                .find(card => Array.from(card.querySelectorAll('h3')).some(heading => heading.innerText.trim() === 'Tilbakemeldinger'));
+            const feedback = Array.from(feedbackCard?.querySelectorAll('.divide-y > div') || [])
+                .map(item => {
+                    const badge = item.querySelector('.FBadge');
+                    const icon = badge?.querySelector('i[data-name], i[data-type]');
+                    return {
+                        status_label: badge?.innerText.trim() || null,
+                        status_icon: icon?.getAttribute('data-name') || icon?.getAttribute('data-type') || null,
+                        status_color: null,
+                        author: item.querySelector('span')?.innerText.trim() || null,
+                        timestamp: item.querySelector('small')?.innerText.trim() || null,
+                        text: item.querySelector('p')?.innerText.trim() || ''
+                    };
+                })
             return {
                 title: main?.querySelector('h3')?.innerText.trim() || null,
                 status_label: statusParagraph?.innerText.trim() || null,
@@ -707,13 +907,30 @@ async fn documentation_detail_snapshot(
                 content_text: content?.innerText.trim() || null,
                 content_html: content?.innerHTML || null,
                 attachments,
-                target_text: targetPanel?.innerText.trim() || null
+                target_text: targetPanel?.innerText.trim() || null,
+                feedback
             };
         }"#,
     )
     .await?
     .into_value()
     .map_err(Into::into)
+}
+
+async fn wait_for_feedback_section(page: &chromiumoxide::Page) -> Result<()> {
+    for _ in 0..20 {
+        let rendered: bool = page
+            .evaluate(
+                "() => { const card = Array.from(document.querySelectorAll('main .vcard')).find(element => Array.from(element.querySelectorAll('h3')).some(heading => heading.innerText.trim() === 'Tilbakemeldinger')); if (!card) return false; return !!card.querySelector('.divide-y > div') || (card.innerText || '').includes('Ingen tilbakemeldinger'); }",
+            )
+            .await?
+            .into_value()?;
+        if rendered {
+            return Ok(());
+        }
+        sleep(Duration::from_millis(250)).await;
+    }
+    Ok(())
 }
 
 pub async fn list_documentation(
@@ -843,6 +1060,7 @@ pub async fn get_documentation(document_id: &str) -> Result<DocumentationRecord>
     let url = format!("{DOCUMENTATION_URL}/{document_id}");
     page.goto(&url).await?;
     wait_for_text(&page, "Sist endret:").await?;
+    wait_for_feedback_section(&page).await?;
     let _ = click_documentation_expansion(&page, "Vedlegg (").await?;
     let _ = click_documentation_expansion(&page, "Se kompetansemål").await?;
     sleep(Duration::from_millis(250)).await;
@@ -1224,6 +1442,45 @@ pub async fn get_delmal(goal_number: u8, delmal_number: u16) -> Result<Delmal> {
     })
 }
 
+pub async fn list_half_year_tasks() -> Result<Vec<HalfYearTask>> {
+    let (browser, handler_task, page, owns_browser) = half_year_page(false).await?;
+    let result = async {
+        let snapshot = half_year_tasks_snapshot(&page).await?;
+        Ok::<Vec<HalfYearTask>, anyhow::Error>(parse_half_year_tasks(snapshot))
+    }
+    .await;
+    finish(browser, handler_task, owns_browser).await?;
+    result
+}
+
+pub async fn get_half_year_task(ordinal: u8) -> Result<HalfYearTask> {
+    if !(1..=6).contains(&ordinal) {
+        bail!("half-year task ordinal must be between 1 and 6");
+    }
+    list_half_year_tasks()
+        .await?
+        .into_iter()
+        .find(|task| task.ordinal == ordinal)
+        .ok_or_else(|| anyhow::anyhow!("could not find half-year task {ordinal}"))
+}
+
+pub async fn list_feedback(document_id: &str) -> Result<Vec<FeedbackRecord>> {
+    Ok(get_documentation(document_id).await?.feedback)
+}
+
+pub async fn get_feedback(document_id: &str, ordinal: u32) -> Result<FeedbackRecord> {
+    if ordinal == 0 {
+        bail!("feedback ordinal must be greater than zero");
+    }
+    list_feedback(document_id)
+        .await?
+        .into_iter()
+        .find(|feedback| feedback.ordinal == ordinal)
+        .ok_or_else(|| {
+            anyhow::anyhow!("could not find feedback {ordinal} for document {document_id}")
+        })
+}
+
 async fn finish(
     mut browser: Browser,
     handler_task: tokio::task::JoinHandle<()>,
@@ -1309,10 +1566,11 @@ pub fn logout() -> Result<()> {
 mod tests {
     use super::{
         DocumentationDetailSnapshot, DocumentationRowSnapshot, DocumentationTableReadiness,
-        PageSnapshot, dashboard_overview_from_snapshot, documentation_record_from_detail,
-        documentation_status_from_ui, documentation_table_is_rendered, parse_documentation_rows,
-        parse_expanded_goal_from_page_text, parse_goals_from_page_text, plain_text_as_safe_html,
-        validate_documentation_target,
+        FeedbackSnapshot, HalfYearTaskSnapshot, PageSnapshot, dashboard_overview_from_snapshot,
+        documentation_record_from_detail, documentation_status_from_ui,
+        documentation_table_is_rendered, parse_documentation_rows,
+        parse_expanded_goal_from_page_text, parse_feedback, parse_goals_from_page_text,
+        parse_half_year_tasks, plain_text_as_safe_html, validate_documentation_target,
     };
     use crate::data::{CompetencyGoalReference, Delmal, DocumentationStatus, DocumentationTarget};
 
@@ -1437,6 +1695,7 @@ mod tests {
                 target_text: Some(
                     "LÆREPLAN\nLæreplan i IT-utviklerfaget\nKompetansemål og vurdering vg3 IT-utviklerfaget\n1 mål og 1 delmål\n15. Feilsøke kode\nDokumentere virksomhetens rutiner for feilsøking\n1 dok.".to_string(),
                 ),
+                feedback: vec![],
             },
         );
 
@@ -1458,6 +1717,73 @@ mod tests {
             target.delmal[0].title,
             "Dokumentere virksomhetens rutiner for feilsøking"
         );
+    }
+
+    #[test]
+    fn parses_half_year_task_fixture_with_ui_ordinals_and_counts() {
+        let tasks = parse_half_year_tasks(vec![
+            HalfYearTaskSnapshot {
+                ordinal: 1,
+                title: "Etikk, lovverk og yrkesutøvelse".to_string(),
+                task_text: Some("Planlegg, gjennomfør, dokumenter og evaluer.".to_string()),
+                status_label: None,
+                status_icon: None,
+                status_color: None,
+                documentation_count: Some(2),
+                linked_documentation: vec![crate::data::LinkedDocumentationSummary {
+                    id: Some("doc-1".to_string()),
+                    title: Some("Etikk i praksis".to_string()),
+                    status: Some(DocumentationStatus::Approved),
+                }],
+            },
+            HalfYearTaskSnapshot {
+                ordinal: 6,
+                title: "Minifagprøve".to_string(),
+                task_text: None,
+                status_label: Some("Godkjent".to_string()),
+                status_icon: Some("check-circle".to_string()),
+                status_color: Some("bg-positive".to_string()),
+                documentation_count: Some(1),
+                linked_documentation: vec![],
+            },
+        ]);
+
+        assert_eq!(tasks.len(), 2);
+        assert_eq!(tasks[0].ordinal, 1);
+        assert_eq!(tasks[0].documentation_count, Some(2));
+        assert_eq!(
+            tasks[0].linked_documentation[0].id.as_deref(),
+            Some("doc-1")
+        );
+        assert_eq!(tasks[0].status, None);
+        assert_eq!(tasks[1].status, Some(DocumentationStatus::Approved));
+        assert_eq!(tasks[1].task_text, None);
+    }
+
+    #[test]
+    fn parses_feedback_fixture_without_avatar_or_other_private_data() {
+        let feedback = parse_feedback(
+            "realDocumentId",
+            vec![FeedbackSnapshot {
+                status_label: Some("Godkjent".to_string()),
+                status_icon: Some("check-circle".to_string()),
+                status_color: Some("bg-positive".to_string()),
+                author: Some("Rune Alexander Laursen".to_string()),
+                timestamp: Some("20.06.2026 11:08".to_string()),
+                text: "Bra dokumentasjon.".to_string(),
+            }],
+        );
+
+        assert_eq!(feedback.len(), 1);
+        assert_eq!(feedback[0].ordinal, 1);
+        assert_eq!(feedback[0].document_id, "realDocumentId");
+        assert_eq!(feedback[0].status, Some(DocumentationStatus::Approved));
+        assert_eq!(
+            feedback[0].author.as_deref(),
+            Some("Rune Alexander Laursen")
+        );
+        assert_eq!(feedback[0].timestamp.as_deref(), Some("20.06.2026 11:08"));
+        assert_eq!(feedback[0].text, "Bra dokumentasjon.");
     }
 
     #[test]
