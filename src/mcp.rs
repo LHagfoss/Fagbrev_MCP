@@ -12,6 +12,7 @@ use rmcp::{
 use serde::{Deserialize, Serialize};
 
 use crate::browser;
+use crate::data::DocumentationStatus;
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -48,6 +49,28 @@ pub struct DelmalRequest {
     pub goal_number: u8,
     /// Ordinal within the parent goal. This is not a Firebase ID.
     pub delmal_number: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DocumentationListRequest {
+    /// 1-based table page. Defaults to 1.
+    #[serde(default)]
+    pub page: Option<u32>,
+    /// Rows per page. Fagbrev currently exposes 6, 12, 18, 24, 100, and 200.
+    #[serde(default)]
+    pub page_size: Option<u32>,
+    /// Optional text searched by the documentation table.
+    #[serde(default)]
+    pub query: Option<String>,
+    /// Optional status filter exposed by the table.
+    #[serde(default)]
+    pub status: Option<DocumentationStatus>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DocumentationRequest {
+    /// The real document ID copied from a /l/dokumentasjon/{id} link.
+    pub document_id: String,
 }
 
 #[tool_router]
@@ -141,6 +164,49 @@ impl FagbrevServer {
             )]),
             Err(error) => CallToolResult::error(vec![rmcp::model::ContentBlock::text(format!(
                 "Could not read delmål: {error:#}"
+            ))]),
+        }
+    }
+
+    /// List documentation rows from the authenticated documentation table.
+    #[tool(
+        name = "list_documentation",
+        description = "List the current user's Fagbrev.io documentation records with real IDs, dates, and UI-derived status. Read-only."
+    )]
+    async fn list_documentation(
+        &self,
+        Parameters(request): Parameters<DocumentationListRequest>,
+    ) -> String {
+        match browser::list_documentation(
+            request.page.unwrap_or(1),
+            request.page_size.unwrap_or(6),
+            request.query,
+            request.status,
+        )
+        .await
+        {
+            Ok(page) => serde_json::to_string_pretty(&page)
+                .unwrap_or_else(|error| format!("Could not serialize documentation: {error}")),
+            Err(error) => format!("Could not read documentation: {error:#}"),
+        }
+    }
+
+    /// Read one documentation detail page without changing it.
+    #[tool(
+        name = "get_documentation",
+        description = "Read one Fagbrev.io documentation record, including visible content, status, timestamps, attachments, and target summary. Read-only."
+    )]
+    async fn get_documentation(
+        &self,
+        Parameters(request): Parameters<DocumentationRequest>,
+    ) -> CallToolResult {
+        match browser::get_documentation(&request.document_id).await {
+            Ok(documentation) => CallToolResult::success(vec![rmcp::model::ContentBlock::text(
+                serde_json::to_string_pretty(&documentation)
+                    .unwrap_or_else(|error| error.to_string()),
+            )]),
+            Err(error) => CallToolResult::error(vec![rmcp::model::ContentBlock::text(format!(
+                "Could not read documentation: {error:#}"
             ))]),
         }
     }
