@@ -1,0 +1,7 @@
+/target/
+/.fagbrev-mcp/
+.DS_Store
+
+# Browser profiles and local session state must never be committed.
+*.session.json
+

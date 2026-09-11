@@ -1,0 +1,26 @@
+[package]
+name = "fagbrev-mcp"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Local stdio MCP server for a user's Fagbrev.io dashboard"
+license = "MIT"
+
+[[bin]]
+name = "fagbrev-mcp"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+chromiumoxide = "0.9.1"
+clap = { version = "4", features = ["derive"] }
+directories = "6"
+futures-util = "0.3"
+rmcp = { version = "3.3.0", default-features = false, features = ["server", "macros", "schemars", "transport-io"] }
+schemars = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
