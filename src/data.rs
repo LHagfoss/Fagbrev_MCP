@@ -72,9 +72,13 @@ pub struct DocumentationRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_html: Option<String>,
     #[serde(default)]
     pub status: DocumentationStatus,
     #[serde(default)]
@@ -87,6 +91,49 @@ pub struct DocumentationRecord {
     pub submitted_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approved_at: Option<String>,
+    #[serde(default)]
+    pub attachments: Vec<DocumentationAttachment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_summary: Option<DocumentationTargetSummary>,
+}
+
+/// A file attached to a documentation record. The UI does not always expose
+/// a download URL or MIME type, so those fields intentionally remain optional.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct DocumentationAttachment {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+}
+
+/// The expandable target summary rendered on a documentation detail page.
+///
+/// These are display references rather than backend records. IDs remain null
+/// unless Fagbrev exposes them in the UI.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct DocumentationTargetSummary {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub learning_plan: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary_text: Option<String>,
+    #[serde(default)]
+    pub competency_goals: Vec<CompetencyGoalReference>,
+    #[serde(default)]
+    pub delmal: Vec<Delmal>,
+}
+
+/// One page from the documentation table.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct DocumentationPage {
+    pub page: u32,
+    pub page_size: u32,
+    pub total: Option<u32>,
+    pub items: Vec<DocumentationRecord>,
 }
 
 /// Documentation counts shown in the dashboard status summary.

@@ -84,12 +84,11 @@ Already implemented as a first read-only slice:
 - `get_competency_goal` — returns the selected goal plus conservatively parsed work activities as delmål
 - `list_delmal` — lists selectable delmål from the documentation target picker
 - `get_delmal` — returns one delmål using its parent goal and UI ordinal
+- `list_documentation` — paginated/searchable documentation rows with real IDs and UI-derived status
+- `get_documentation` — read-only detail content, status, attachments, and target summary
 
 Next read-only tools:
 
-- `list_delmal` — list the suggested sub-goals/work activities for a competency goal
-- `get_delmal` — return one sub-goal with its parent competency goal
-- `list_documentation` — list submitted, approved, in-review, and correction-needed documentation
 - `list_half_year_tasks`
 - `get_half_year_task`
 
@@ -183,4 +182,4 @@ This project handles apprenticeship records and potentially personal or employer
 
 ## Project status
 
-The read-only prototype can return the dashboard overview/status, list the 21 competency goals, read an expanded competency goal with parsed delmål, and list/get delmål from the authenticated documentation target picker. Documentation listing, local template matching, and external write actions remain separate future milestones.
+The read-only prototype can return the dashboard overview/status, list the 21 competency goals, read an expanded competency goal with parsed delmål, list/get delmål from the authenticated documentation target picker, and list/read documentation records. Local template matching and external write actions remain separate future milestones.
