@@ -1,3 +1,4 @@
+mod attachments;
 mod browser;
 mod cli;
 mod context;

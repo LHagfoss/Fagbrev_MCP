@@ -92,7 +92,7 @@ pub struct DocumentationRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approved_at: Option<String>,
     #[serde(default)]
-    pub attachments: Vec<DocumentationAttachment>,
+    pub attachments: Vec<AttachmentMetadata>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_summary: Option<DocumentationTargetSummary>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -139,18 +139,64 @@ pub struct FeedbackRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<String>,
     pub text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<AttachmentMetadata>,
 }
 
-/// A file attached to a documentation record. The UI does not always expose
-/// a download URL or MIME type, so those fields intentionally remain optional.
+/// A file attachment observed in a Fagbrev page. The ordinal is UI-local and
+/// scoped to the selected source; it is not a Firebase ID.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-pub struct DocumentationAttachment {
+pub struct AttachmentMetadata {
+    pub ordinal: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mime_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AttachmentSource {
+    Documentation {
+        document_id: String,
+    },
+    Feedback {
+        document_id: String,
+        feedback_ordinal: u32,
+    },
+    CompetencyGoal {
+        goal_number: u8,
+    },
+    Delmal {
+        goal_number: u8,
+        delmal_number: u16,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct AttachmentList {
+    pub source: AttachmentSource,
+    #[serde(default)]
+    pub attachments: Vec<AttachmentMetadata>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct AttachmentDownloadResult {
+    pub source: AttachmentSource,
+    pub attachment_ordinal: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    pub output_path: String,
+    pub bytes_written: u64,
+    pub overwritten: bool,
 }
 
 /// The expandable target summary rendered on a documentation detail page.
@@ -254,6 +300,8 @@ pub struct CompetencyGoalDetails {
     pub status_count: Option<u32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub delmal: Vec<Delmal>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<AttachmentMetadata>,
 }
 
 /// A source item selected when searching for reusable learner-written content.

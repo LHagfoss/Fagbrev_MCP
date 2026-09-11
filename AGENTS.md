@@ -40,12 +40,23 @@ The server has no hidden conversation memory. It keeps the saved browser authent
 - Dashboard: `get_dashboard_overview`, `get_status`
 - Learning plan: `list_competency_goals`, `get_competency_goal`, `list_delmal`, `get_delmal`
 - Documentation: `list_documentation`, `get_documentation`
+- Attachments: `list_attachments`, `download_attachment`
 - Local composition: `find_reusable_content`, `make_documentation_template`
 - Local drafts: `save_draft`, `list_drafts`, `get_draft`, `update_draft`, `delete_draft`
 - Bounded assembly: `get_context_bundle`
 - Half-year tasks and feedback are read-only tools exposed by the current main branch.
 
 Read tools should return normalized models from `src/data.rs`, not raw browser HTML. Raw page text is for diagnostics and should eventually be limited to `inspect`.
+
+Attachment reads inspect the visible `.FFileViewerBtn` controls on documentation,
+feedback, and expanded competency-goal pages. Metadata contains UI-local
+ordinals, names, and only URLs/MIME/size values that the page exposes. Delmål
+attachments are supported only if the UI exposes a distinct control; no
+Firebase or guessed API identifier is created. Downloads click that same
+visible control, let Chromium stream to a temporary directory beside the
+requested file, enforce a 25 MiB limit, and move the result to an explicit
+absolute path. MCP never returns file bytes. Existing files are protected
+unless `overwrite: true` is passed.
 
 `list_competency_goals` validates that all 21 numbered goals were parsed. The page has rendered its status count both before and after a numbered heading, so the parser accepts either adjacent order and reports a clear error instead of returning an empty success when the UI is still loading or changes.
 

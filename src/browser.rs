@@ -1,22 +1,29 @@
 use std::{
-    env,
+    env, fs,
     io::{self, Write},
-    path::PathBuf,
-    time::Duration,
+    path::{Path, PathBuf},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, bail};
-use chromiumoxide::{Browser, browser::BrowserConfig};
+use chromiumoxide::{
+    Browser,
+    browser::BrowserConfig,
+    cdp::browser_protocol::browser::{SetDownloadBehaviorBehavior, SetDownloadBehaviorParams},
+};
 use directories::ProjectDirs;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::time::{sleep, timeout};
 
+use crate::attachments::{MAX_ATTACHMENT_BYTES, finalize_download, validate_output_path};
+
 use crate::data::{
-    CompetencyGoal, CompetencyGoalDetails, CompetencyGoalReference, DashboardOverview,
-    DeleteDocumentationResult, Delmal, DocumentationAttachment, DocumentationPage,
-    DocumentationRecord, DocumentationStatus, DocumentationTarget, DocumentationTargetSummary,
-    FeedbackRecord, HalfYearTask, LinkedDocumentationSummary, RequestApprovalResult,
+    AttachmentDownloadResult, AttachmentList, AttachmentMetadata, AttachmentSource, CompetencyGoal,
+    CompetencyGoalDetails, CompetencyGoalReference, DashboardOverview, DeleteDocumentationResult,
+    Delmal, DocumentationPage, DocumentationRecord, DocumentationStatus, DocumentationTarget,
+    DocumentationTargetSummary, FeedbackRecord, HalfYearTask, LinkedDocumentationSummary,
+    RequestApprovalResult,
 };
 
 const FAGBREV_URL: &str = "https://fagbrev.io/l";
@@ -73,7 +80,7 @@ struct DocumentationDetailSnapshot {
     updated_at: Option<String>,
     content_text: Option<String>,
     content_html: Option<String>,
-    attachments: Vec<DocumentationAttachment>,
+    attachments: Vec<AttachmentMetadata>,
     target_text: Option<String>,
     feedback: Vec<FeedbackSnapshot>,
 }
@@ -86,6 +93,8 @@ struct FeedbackSnapshot {
     author: Option<String>,
     timestamp: Option<String>,
     text: String,
+    #[serde(default)]
+    attachments: Vec<AttachmentMetadata>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -296,6 +305,7 @@ fn parse_feedback(document_id: &str, entries: Vec<FeedbackSnapshot>) -> Vec<Feed
                     .map(|value| value.trim().to_string())
                     .filter(|value| !value.is_empty()),
                 text,
+                attachments: entry.attachments,
             })
         })
         .collect()
@@ -785,6 +795,46 @@ fn parse_expanded_goal_from_page_text(
     (title, status_count, delmal)
 }
 
+async fn competency_goal_attachment_snapshot(
+    page: &chromiumoxide::Page,
+    goal_number: u8,
+    delmal_title: Option<&str>,
+) -> Result<Vec<AttachmentMetadata>> {
+    let delmal_title = serde_json::to_string(&delmal_title)?;
+    page.evaluate(format!(
+        r#"() => {{
+            const normalize = value => (value || '').replace(/\s+/g, ' ').trim();
+            const button = Array.from(document.querySelectorAll('main button')).find(element => new RegExp('(?:^|\\s){}\\.\\s').test(normalize(element.innerText)));
+            const root = button?.parentElement;
+            const target = {delmal_title};
+            const all = Array.from(root?.querySelectorAll('.FFileViewerBtn') || []);
+            const selected = target ? all.filter(element => {{
+                let node = element.parentElement;
+                while (node && node !== root) {{
+                    if (normalize(node.innerText).includes(target)) return true;
+                    node = node.parentElement;
+                }}
+                return false;
+            }}) : all;
+            return selected.map((element, index) => {{
+                const clickable = element.matches('a,button') ? element : element.querySelector('a,button') || element.closest('a,button');
+                const rawUrl = clickable?.getAttribute('href') || clickable?.getAttribute('data-url') || element.getAttribute('data-url');
+                let url = null;
+                try {{ const parsed = rawUrl ? new URL(rawUrl, window.location.href) : null; url = parsed && (parsed.protocol === 'http:' || parsed.protocol === 'https:') ? parsed.href : null; }} catch (_) {{}}
+                const name = (element.querySelector('.FFileViewerBtn-content span')?.innerText || clickable?.getAttribute('aria-label') || element.getAttribute('title') || element.innerText || '').trim() || null;
+                const mime = clickable?.getAttribute('data-mime-type') || clickable?.getAttribute('data-mime') || element.getAttribute('data-mime-type') || null;
+                const sizeValue = clickable?.getAttribute('data-size-bytes') || element.getAttribute('data-size-bytes');
+                const parsedSize = sizeValue && /^\d+$/.test(sizeValue) ? Number(sizeValue) : null;
+                return {{ordinal: index + 1, name, url, mime_type: mime, size_bytes: parsedSize}};
+            }});
+        }}"#,
+        goal_number
+    ))
+    .await?
+    .into_value()
+    .map_err(Into::into)
+}
+
 async fn documentation_picker_page(
     headful: bool,
 ) -> Result<(
@@ -937,10 +987,22 @@ async fn documentation_detail_snapshot(
             const attachmentButton = Array.from(main?.querySelectorAll('button') || [])
                 .find(button => /^Vedlegg \(\d+\)$/.test(button.innerText.trim()));
             const attachmentPanel = attachmentButton?.closest('.FExpantion');
-            const attachments = Array.from(attachmentPanel?.querySelectorAll('.FFileViewerBtn-content span') || [])
-                .map(element => element.innerText.trim())
-                .filter(Boolean)
-                .map(name => ({name, url: null, mime_type: null}));
+            const attachmentMetadata = root => Array.from(root?.querySelectorAll('.FFileViewerBtn') || [])
+                .map((element, index) => {
+                    const clickable = element.matches('a,button') ? element : element.querySelector('a,button') || element.closest('a,button');
+                    const rawUrl = clickable?.getAttribute('href') || clickable?.getAttribute('data-url') || element.getAttribute('data-url');
+                    let url = null;
+                    try {
+                        const parsed = rawUrl ? new URL(rawUrl, window.location.href) : null;
+                        url = parsed && (parsed.protocol === 'http:' || parsed.protocol === 'https:') ? parsed.href : null;
+                    } catch (_) {}
+                    const name = (element.querySelector('.FFileViewerBtn-content span')?.innerText || clickable?.getAttribute('aria-label') || element.getAttribute('title') || element.innerText || '').trim() || null;
+                    const mime = clickable?.getAttribute('data-mime-type') || clickable?.getAttribute('data-mime') || element.getAttribute('data-mime-type') || null;
+                    const sizeValue = clickable?.getAttribute('data-size-bytes') || element.getAttribute('data-size-bytes');
+                    const parsedSize = sizeValue && /^\d+$/.test(sizeValue) ? Number(sizeValue) : null;
+                    return {ordinal: index + 1, name, url, mime_type: mime, size_bytes: parsedSize};
+                });
+            const attachments = attachmentMetadata(attachmentPanel);
             const targetButton = Array.from(main?.querySelectorAll('button') || [])
                 .find(button => button.innerText.trim().startsWith('Se kompetansemål'));
             const targetPanel = targetButton?.closest('.FExpantion');
@@ -956,7 +1018,8 @@ async fn documentation_detail_snapshot(
                         status_color: null,
                         author: item.querySelector('span')?.innerText.trim() || null,
                         timestamp: item.querySelector('small')?.innerText.trim() || null,
-                        text: item.querySelector('p')?.innerText.trim() || ''
+                        text: item.querySelector('p')?.innerText.trim() || '',
+                        attachments: attachmentMetadata(item)
                     };
                 })
             return {
@@ -1705,6 +1768,7 @@ pub async fn competency_goal(number: u8) -> Result<CompetencyGoalDetails> {
     sleep(Duration::from_millis(500)).await;
     let snapshot = page_snapshot(&page).await?;
     let (title, status_count, delmal) = parse_expanded_goal_from_page_text(&snapshot.text, number);
+    let attachments = competency_goal_attachment_snapshot(&page, number, None).await?;
     let result = CompetencyGoalDetails {
         number,
         url: snapshot.url,
@@ -1713,9 +1777,39 @@ pub async fn competency_goal(number: u8) -> Result<CompetencyGoalDetails> {
         title,
         status_count,
         delmal,
+        attachments,
     };
     finish(browser, handler_task, owns_browser).await?;
     Ok(result)
+}
+
+async fn delmal_attachments(
+    goal_number: u8,
+    delmal_number: u16,
+) -> Result<Vec<AttachmentMetadata>> {
+    let (browser, handler_task, page, owns_browser) = plan_page(false).await?;
+    let clicked: bool = page
+        .evaluate(format!(
+            "() => {{ const button = Array.from(document.querySelectorAll('main button')).find(element => new RegExp('(?:^|\\\\s){}\\\\.\\\\s').test((element.innerText || '').replace(/\\\\s+/g, ' ').trim())); if (!button) return false; button.click(); return true; }}",
+            goal_number
+        ))
+        .await?
+        .into_value()?;
+    if !clicked {
+        finish(browser, handler_task, owns_browser).await?;
+        bail!("could not find competency goal {goal_number} on the plan page");
+    }
+    sleep(Duration::from_millis(500)).await;
+    let snapshot = page_snapshot(&page).await?;
+    let (_, _, delmal) = parse_expanded_goal_from_page_text(&snapshot.text, goal_number);
+    let target = delmal
+        .into_iter()
+        .find(|item| item.number == Some(delmal_number))
+        .with_context(|| format!("could not find delmål {delmal_number} for goal {goal_number}"))?;
+    let attachments =
+        competency_goal_attachment_snapshot(&page, goal_number, Some(&target.title)).await?;
+    finish(browser, handler_task, owns_browser).await?;
+    Ok(attachments)
 }
 
 pub async fn list_delmal(goal_number: Option<u8>) -> Result<Vec<Delmal>> {
@@ -1786,6 +1880,326 @@ pub async fn get_feedback(document_id: &str, ordinal: u32) -> Result<FeedbackRec
         .ok_or_else(|| {
             anyhow::anyhow!("could not find feedback {ordinal} for document {document_id}")
         })
+}
+
+fn validate_attachment_source(source: &AttachmentSource) -> Result<()> {
+    match source {
+        AttachmentSource::Documentation { document_id }
+        | AttachmentSource::Feedback { document_id, .. } => validate_documentation_id(document_id),
+        AttachmentSource::CompetencyGoal { goal_number }
+        | AttachmentSource::Delmal { goal_number, .. } => {
+            if !(1..=21).contains(goal_number) {
+                bail!("goal number must be between 1 and 21");
+            }
+            if let AttachmentSource::Delmal { delmal_number, .. } = source
+                && *delmal_number == 0
+            {
+                bail!("delmal_number must be greater than zero");
+            }
+            Ok(())
+        }
+    }
+}
+
+fn attachment_list_result(
+    source: AttachmentSource,
+    attachments: Vec<AttachmentMetadata>,
+) -> AttachmentList {
+    let warnings = if attachments.is_empty() {
+        vec![
+            "No attachment controls were exposed by the current Fagbrev UI for this source."
+                .to_string(),
+        ]
+    } else {
+        Vec::new()
+    };
+    AttachmentList {
+        source,
+        attachments,
+        warnings,
+    }
+}
+
+pub async fn list_attachments(source: AttachmentSource) -> Result<AttachmentList> {
+    validate_attachment_source(&source)?;
+    match &source {
+        AttachmentSource::Documentation { document_id } => Ok(attachment_list_result(
+            source.clone(),
+            get_documentation(document_id).await?.attachments,
+        )),
+        AttachmentSource::Feedback {
+            document_id,
+            feedback_ordinal,
+        } => Ok(attachment_list_result(
+            source.clone(),
+            get_feedback(document_id, *feedback_ordinal)
+                .await?
+                .attachments,
+        )),
+        AttachmentSource::CompetencyGoal { goal_number } => Ok(attachment_list_result(
+            source.clone(),
+            competency_goal(*goal_number).await?.attachments,
+        )),
+        AttachmentSource::Delmal {
+            goal_number,
+            delmal_number,
+        } => {
+            let attachments = delmal_attachments(*goal_number, *delmal_number).await?;
+            if attachments.is_empty() {
+                bail!(
+                    "the current Fagbrev UI does not expose an independent attachment control for this delmål"
+                );
+            }
+            Ok(attachment_list_result(source.clone(), attachments))
+        }
+    }
+}
+
+fn attachment_click_script(
+    source: &AttachmentSource,
+    ordinal: u32,
+    delmal_title: Option<&str>,
+) -> Result<String> {
+    if ordinal == 0 {
+        bail!("attachment ordinal must be greater than zero");
+    }
+    let index = usize::try_from(ordinal - 1).context("attachment ordinal is too large")?;
+    let extractor = "const attachment = (root, index) => { const items = Array.from(root?.querySelectorAll('.FFileViewerBtn') || []); const item = items[index]; if (!item) return false; (item.matches('a,button') ? item : item.querySelector('a,button') || item).click(); return true; };";
+    match source {
+        AttachmentSource::Documentation { .. } => Ok(format!(
+            r#"() => {{
+            {extractor}
+            const panelButton = Array.from(document.querySelectorAll('main button')).find(button => (button.innerText || '').trim().startsWith('Vedlegg ('));
+            return attachment(panelButton?.closest('.FExpantion'), {index});
+        }}"#
+        )),
+        AttachmentSource::Feedback {
+            feedback_ordinal, ..
+        } => {
+            let feedback_index = feedback_ordinal
+                .checked_sub(1)
+                .context("feedback ordinal must be greater than zero")?;
+            Ok(format!(
+                r#"() => {{
+                {extractor}
+                const card = Array.from(document.querySelectorAll('main .vcard')).find(element => Array.from(element.querySelectorAll('h3')).some(heading => heading.innerText.trim() === 'Tilbakemeldinger'));
+                const entries = Array.from(card?.querySelectorAll('.divide-y > div') || []).filter(item => (item.querySelector('p')?.innerText || '').trim());
+                return attachment(entries[{feedback_index}], {index});
+            }}"#
+            ))
+        }
+        AttachmentSource::CompetencyGoal { goal_number } => Ok(format!(
+            r#"() => {{
+            {extractor}
+            const button = Array.from(document.querySelectorAll('main button')).find(element => new RegExp('(?:^|\\s){}\\.\\s').test((element.innerText || '').replace(/\\s+/g, ' ').trim()));
+            return attachment(button?.parentElement, {index});
+        }}"#,
+            goal_number
+        )),
+        AttachmentSource::Delmal { goal_number, .. } => {
+            let title = delmal_title.context("delmål title is required for attachment download")?;
+            let title = serde_json::to_string(title)?;
+            Ok(format!(
+                r#"() => {{
+                {extractor}
+                const button = Array.from(document.querySelectorAll('main button')).find(element => new RegExp('(?:^|\\s){}\\.\\s').test((element.innerText || '').replace(/\\s+/g, ' ').trim()));
+                const root = button?.parentElement;
+                const target = {title};
+                const items = Array.from(root?.querySelectorAll('.FFileViewerBtn') || []).filter(element => {{
+                    let node = element.parentElement;
+                    while (node && node !== root) {{
+                        if ((node.innerText || '').replace(/\\s+/g, ' ').trim().includes(target)) return true;
+                        node = node.parentElement;
+                    }}
+                    return false;
+                }});
+                const item = items[{index}];
+                if (!item) return false;
+                (item.matches('a,button') ? item : item.querySelector('a,button') || item).click();
+                return true;
+            }}"#,
+                goal_number
+            ))
+        }
+    }
+}
+
+async fn wait_for_download(download_dir: &Path) -> Result<PathBuf> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let mut candidates = Vec::new();
+        for entry in fs::read_dir(download_dir)? {
+            let path = entry?.path();
+            if path.is_file()
+                && path
+                    .extension()
+                    .is_none_or(|extension| extension != "crdownload")
+            {
+                candidates.push(path);
+            }
+        }
+        if candidates.len() == 1 {
+            if fs::metadata(&candidates[0])?.len() > MAX_ATTACHMENT_BYTES {
+                bail!("attachment exceeds the {MAX_ATTACHMENT_BYTES} byte download limit");
+            }
+            return Ok(candidates.remove(0));
+        }
+        if candidates.len() > 1 {
+            bail!("attachment download produced more than one file");
+        }
+        if tokio::time::Instant::now() >= deadline {
+            bail!(
+                "the visible attachment control did not produce a completed download within 30 seconds"
+            );
+        }
+        sleep(Duration::from_millis(250)).await;
+    }
+}
+
+async fn download_from_page(
+    browser: &Browser,
+    page: &chromiumoxide::Page,
+    source: &AttachmentSource,
+    ordinal: u32,
+    delmal_title: Option<&str>,
+    output_path: &Path,
+    overwrite: bool,
+) -> Result<u64> {
+    let parent = output_path
+        .parent()
+        .context("output_path has no parent directory")?;
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock is before the Unix epoch")?
+        .as_nanos();
+    let download_dir = parent.join(format!(
+        ".fagbrev-mcp-download-{}-{suffix}",
+        std::process::id()
+    ));
+    fs::create_dir(&download_dir).with_context(|| {
+        format!(
+            "could not create temporary download directory {}",
+            download_dir.display()
+        )
+    })?;
+    let result = async {
+        browser
+            .execute(
+                SetDownloadBehaviorParams::builder()
+                    .behavior(SetDownloadBehaviorBehavior::Allow)
+                    .download_path(download_dir.to_string_lossy())
+                    .build()
+                    .map_err(|error| anyhow::anyhow!(error))?,
+            )
+            .await?;
+        let clicked: bool = page
+            .evaluate(attachment_click_script(source, ordinal, delmal_title)?)
+            .await?
+            .into_value()?;
+        if !clicked {
+            bail!("the selected attachment control is not exposed by the current Fagbrev UI");
+        }
+        wait_for_download(&download_dir).await
+    }
+    .await;
+    let result = match result {
+        Ok(temp) => finalize_download(&temp, output_path, overwrite),
+        Err(error) => Err(error),
+    };
+    let _ = fs::remove_dir_all(&download_dir);
+    result
+}
+
+pub async fn download_attachment(
+    source: AttachmentSource,
+    ordinal: u32,
+    output_path: &str,
+    overwrite: bool,
+) -> Result<AttachmentDownloadResult> {
+    validate_attachment_source(&source)?;
+    let output_path = validate_output_path(output_path, overwrite)?;
+    let available = list_attachments(source.clone()).await?;
+    let attachment = available
+        .attachments
+        .iter()
+        .find(|attachment| attachment.ordinal == ordinal)
+        .with_context(|| format!("could not find attachment {ordinal} for the selected source"))?;
+    let metadata = attachment.clone();
+    let mut delmal_title = None;
+    let (browser, handler_task, page, owns_browser) = match &source {
+        AttachmentSource::Documentation { document_id }
+        | AttachmentSource::Feedback { document_id, .. } => {
+            let session = open_dashboard(false).await?;
+            let url = format!("{DOCUMENTATION_URL}/{document_id}");
+            session.2.goto(&url).await?;
+            wait_for_text(&session.2, "Sist endret:").await?;
+            wait_for_feedback_section(&session.2).await?;
+            let _ = click_documentation_expansion(&session.2, "Vedlegg (").await?;
+            (session.0, session.1, session.2, session.3)
+        }
+        AttachmentSource::CompetencyGoal { goal_number } => {
+            let session = plan_page(false).await?;
+            let clicked: bool = session.2.evaluate(format!("() => {{ const button = Array.from(document.querySelectorAll('main button')).find(element => new RegExp('(?:^|\\\\s){}\\\\.\\\\s').test((element.innerText || '').replace(/\\\\s+/g, ' ').trim())); if (!button) return false; button.click(); return true; }}", goal_number)).await?.into_value()?;
+            if !clicked {
+                finish(session.0, session.1, session.3).await?;
+                bail!("could not find competency goal {goal_number} on the plan page");
+            }
+            sleep(Duration::from_millis(500)).await;
+            (session.0, session.1, session.2, session.3)
+        }
+        AttachmentSource::Delmal {
+            goal_number,
+            delmal_number,
+        } => {
+            let session = plan_page(false).await?;
+            let clicked: bool = session
+                .2
+                .evaluate(format!(
+                    "() => {{ const button = Array.from(document.querySelectorAll('main button')).find(element => new RegExp('(?:^|\\\\s){}\\\\.\\\\s').test((element.innerText || '').replace(/\\\\s+/g, ' ').trim())); if (!button) return false; button.click(); return true; }}",
+                    goal_number
+                ))
+                .await?
+                .into_value()?;
+            if !clicked {
+                finish(session.0, session.1, session.3).await?;
+                bail!("could not find competency goal {goal_number} on the plan page");
+            }
+            sleep(Duration::from_millis(500)).await;
+            let snapshot = page_snapshot(&session.2).await?;
+            let (_, _, delmal) = parse_expanded_goal_from_page_text(&snapshot.text, *goal_number);
+            delmal_title = Some(
+                delmal
+                    .into_iter()
+                    .find(|item| item.number == Some(*delmal_number))
+                    .with_context(|| {
+                        format!("could not find delmål {delmal_number} for goal {goal_number}")
+                    })?
+                    .title,
+            );
+            (session.0, session.1, session.2, session.3)
+        }
+    };
+    let result = download_from_page(
+        &browser,
+        &page,
+        &source,
+        ordinal,
+        delmal_title.as_deref(),
+        &output_path,
+        overwrite,
+    )
+    .await;
+    let result = result.map(|bytes_written| AttachmentDownloadResult {
+        source: source.clone(),
+        attachment_ordinal: ordinal,
+        name: metadata.name,
+        mime_type: metadata.mime_type,
+        output_path: output_path.display().to_string(),
+        bytes_written,
+        overwritten: overwrite,
+    });
+    finish(browser, handler_task, owns_browser).await?;
+    result
 }
 
 async fn finish(
@@ -2036,10 +2450,12 @@ mod tests {
                 updated_at: Some("03.06.2026".to_string()),
                 content_text: Some("Visible documentation text".to_string()),
                 content_html: Some("<p>Visible documentation text</p>".to_string()),
-                attachments: vec![crate::data::DocumentationAttachment {
+                attachments: vec![crate::data::AttachmentMetadata {
+                    ordinal: 1,
                     name: Some("evidence.docx".to_string()),
                     url: None,
                     mime_type: None,
+                    size_bytes: None,
                 }],
                 target_text: Some(
                     "LÆREPLAN\nLæreplan i IT-utviklerfaget\nKompetansemål og vurdering vg3 IT-utviklerfaget\n1 mål og 1 delmål\n15. Feilsøke kode\nDokumentere virksomhetens rutiner for feilsøking\n1 dok.".to_string(),
@@ -2059,6 +2475,7 @@ mod tests {
             Some("<p>Visible documentation text</p>")
         );
         assert_eq!(record.attachments[0].name.as_deref(), Some("evidence.docx"));
+        assert_eq!(record.attachments[0].ordinal, 1);
         let target = record.target_summary.expect("target summary");
         assert_eq!(target.competency_goals[0].number, 15);
         assert_eq!(target.delmal[0].id, None);
@@ -2120,6 +2537,7 @@ mod tests {
                 author: Some("Rune Alexander Laursen".to_string()),
                 timestamp: Some("20.06.2026 11:08".to_string()),
                 text: "Bra dokumentasjon.".to_string(),
+                attachments: vec![],
             }],
         );
 
@@ -2133,6 +2551,7 @@ mod tests {
         );
         assert_eq!(feedback[0].timestamp.as_deref(), Some("20.06.2026 11:08"));
         assert_eq!(feedback[0].text, "Bra dokumentasjon.");
+        assert!(feedback[0].attachments.is_empty());
     }
 
     #[test]

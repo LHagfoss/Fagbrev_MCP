@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::browser;
 use crate::data::{
-    DeleteDocumentationResult, DocumentationStatus, DocumentationTarget,
+    AttachmentSource, DeleteDocumentationResult, DocumentationStatus, DocumentationTarget,
     DocumentationUpdatePreview, DocumentationWritePreview, DraftDeleteResult, DraftWriteResult,
     RequestApprovalResult, SubmitDocumentationResult, UpdateDocumentationResult,
 };
@@ -74,6 +74,20 @@ pub struct FeedbackRequest {
     pub document_id: String,
     /// UI-local feedback ordinal, newest first; not a backend ID.
     pub feedback_ordinal: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AttachmentListRequest {
+    pub source: AttachmentSource,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AttachmentDownloadRequest {
+    pub source: AttachmentSource,
+    pub attachment_ordinal: u32,
+    pub output_path: String,
+    #[serde(default)]
+    pub overwrite: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -511,6 +525,41 @@ impl FagbrevServer {
             Err(error) => CallToolResult::error(vec![rmcp::model::ContentBlock::text(format!(
                 "Could not read documentation: {error:#}"
             ))]),
+        }
+    }
+
+    #[tool(
+        name = "list_attachments",
+        description = "Read-only discovery of attachment controls exposed by Fagbrev.io for a documentation record, feedback entry, competency goal, or delmål. Returns bounded metadata and UI-local ordinals; never guesses Firebase endpoints."
+    )]
+    async fn list_attachments(
+        &self,
+        Parameters(request): Parameters<AttachmentListRequest>,
+    ) -> CallToolResult {
+        match browser::list_attachments(request.source).await {
+            Ok(result) => json_success(&result),
+            Err(error) => json_error(format!("Could not read attachments: {error:#}")),
+        }
+    }
+
+    #[tool(
+        name = "download_attachment",
+        description = "Read-only attachment download to an explicit absolute local path. Clicks only the selected visible UI control, enforces a 25 MiB limit, refuses overwrite unless overwrite=true, and never returns file bytes through MCP."
+    )]
+    async fn download_attachment(
+        &self,
+        Parameters(request): Parameters<AttachmentDownloadRequest>,
+    ) -> CallToolResult {
+        match browser::download_attachment(
+            request.source,
+            request.attachment_ordinal,
+            &request.output_path,
+            request.overwrite,
+        )
+        .await
+        {
+            Ok(result) => json_success(&result),
+            Err(error) => json_error(format!("Could not download attachment: {error:#}")),
         }
     }
 
@@ -957,6 +1006,7 @@ pub async fn serve() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
+        AttachmentDownloadRequest, AttachmentListRequest, AttachmentSource,
         DeleteDocumentationRequest, RequestApprovalRequest, SubmitDocumentationRequest,
         UpdateDocumentationRequest, approval_preview, delete_preview, json_error, json_success,
         submit_preview, update_preview,
@@ -997,6 +1047,23 @@ mod tests {
             error.content[0].as_text().expect("text content").text,
             "could not read dashboard"
         );
+    }
+
+    #[test]
+    fn attachment_requests_have_bounded_explicit_path_schema() {
+        let schema = serde_json::to_value(schemars::schema_for!(AttachmentDownloadRequest))
+            .expect("attachment schema should serialize");
+        assert!(schema.to_string().contains("output_path"));
+        assert!(schema.to_string().contains("attachment_ordinal"));
+
+        let source: AttachmentSource = serde_json::from_value(serde_json::json!({
+            "kind": "feedback",
+            "document_id": "doc-1",
+            "feedback_ordinal": 1
+        }))
+        .expect("feedback source should deserialize");
+        let request = AttachmentListRequest { source };
+        assert!(serde_json::to_value(request).is_ok());
     }
 
     #[test]
