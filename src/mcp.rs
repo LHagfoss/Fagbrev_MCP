@@ -55,6 +55,26 @@ pub struct DelmalRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct HalfYearTaskRequest {
+    /// UI-local ordinal for one of the six half-year assignment areas.
+    pub ordinal: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct FeedbackListRequest {
+    /// The real document ID copied from a Fagbrev documentation link.
+    pub document_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct FeedbackRequest {
+    /// The real document ID copied from a Fagbrev documentation link.
+    pub document_id: String,
+    /// UI-local feedback ordinal, newest first; not a backend ID.
+    pub feedback_ordinal: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct DocumentationListRequest {
     /// 1-based table page. Defaults to 1.
     #[serde(default)]
@@ -260,6 +280,38 @@ impl FagbrevServer {
         }
     }
 
+    /// List the six expandable half-year assignment areas.
+    #[tool(
+        name = "list_half_year_tasks",
+        description = "List the six read-only Fagbrev.io half-year assignment and minifagprøve areas with their visible task text and documentation counts. Ordinals are UI-local."
+    )]
+    async fn list_half_year_tasks(&self) -> String {
+        match browser::list_half_year_tasks().await {
+            Ok(tasks) => serde_json::to_string_pretty(&tasks)
+                .unwrap_or_else(|error| format!("Could not serialize half-year tasks: {error}")),
+            Err(error) => format!("Could not read half-year tasks: {error:#}"),
+        }
+    }
+
+    /// Read one half-year assignment area.
+    #[tool(
+        name = "get_half_year_task",
+        description = "Read one of the six Fagbrev.io half-year assignment areas by UI-local ordinal. Read-only."
+    )]
+    async fn get_half_year_task(
+        &self,
+        Parameters(request): Parameters<HalfYearTaskRequest>,
+    ) -> CallToolResult {
+        match browser::get_half_year_task(request.ordinal).await {
+            Ok(task) => CallToolResult::success(vec![rmcp::model::ContentBlock::text(
+                serde_json::to_string_pretty(&task).unwrap_or_else(|error| error.to_string()),
+            )]),
+            Err(error) => CallToolResult::error(vec![rmcp::model::ContentBlock::text(format!(
+                "Could not read half-year task: {error:#}"
+            ))]),
+        }
+    }
+
     /// List documentation rows from the authenticated documentation table.
     #[tool(
         name = "list_documentation",
@@ -299,6 +351,38 @@ impl FagbrevServer {
             )]),
             Err(error) => CallToolResult::error(vec![rmcp::model::ContentBlock::text(format!(
                 "Could not read documentation: {error:#}"
+            ))]),
+        }
+    }
+
+    /// List feedback entries visible on one documentation detail page.
+    #[tool(
+        name = "list_feedback",
+        description = "List feedback entries visible on one authenticated Fagbrev.io documentation detail page. Feedback ordinals are UI-local and no private profile data is collected. Read-only."
+    )]
+    async fn list_feedback(&self, Parameters(request): Parameters<FeedbackListRequest>) -> String {
+        match browser::list_feedback(&request.document_id).await {
+            Ok(feedback) => serde_json::to_string_pretty(&feedback)
+                .unwrap_or_else(|error| format!("Could not serialize feedback: {error}")),
+            Err(error) => format!("Could not read feedback: {error:#}"),
+        }
+    }
+
+    /// Read one feedback entry visible on a documentation detail page.
+    #[tool(
+        name = "get_feedback",
+        description = "Read one visible feedback entry by documentation ID and UI-local newest-first ordinal. Read-only."
+    )]
+    async fn get_feedback(
+        &self,
+        Parameters(request): Parameters<FeedbackRequest>,
+    ) -> CallToolResult {
+        match browser::get_feedback(&request.document_id, request.feedback_ordinal).await {
+            Ok(feedback) => CallToolResult::success(vec![rmcp::model::ContentBlock::text(
+                serde_json::to_string_pretty(&feedback).unwrap_or_else(|error| error.to_string()),
+            )]),
+            Err(error) => CallToolResult::error(vec![rmcp::model::ContentBlock::text(format!(
+                "Could not read feedback: {error:#}"
             ))]),
         }
     }
