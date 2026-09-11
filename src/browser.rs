@@ -13,10 +13,10 @@ use serde::{Deserialize, Serialize};
 use tokio::time::{sleep, timeout};
 
 use crate::data::{
-    CompetencyGoal, CompetencyGoalDetails, CompetencyGoalReference, DashboardOverview, Delmal,
-    DocumentationAttachment, DocumentationPage, DocumentationRecord, DocumentationStatus,
-    DocumentationTarget, DocumentationTargetSummary, FeedbackRecord, HalfYearTask,
-    LinkedDocumentationSummary, RequestApprovalResult,
+    CompetencyGoal, CompetencyGoalDetails, CompetencyGoalReference, DashboardOverview,
+    DeleteDocumentationResult, Delmal, DocumentationAttachment, DocumentationPage,
+    DocumentationRecord, DocumentationStatus, DocumentationTarget, DocumentationTargetSummary,
+    FeedbackRecord, HalfYearTask, LinkedDocumentationSummary, RequestApprovalResult,
 };
 
 const FAGBREV_URL: &str = "https://fagbrev.io/l";
@@ -1048,13 +1048,7 @@ pub async fn list_documentation(
 }
 
 pub async fn get_documentation(document_id: &str) -> Result<DocumentationRecord> {
-    if document_id.is_empty()
-        || !document_id
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
-    {
-        bail!("document_id must be the ID from a Fagbrev documentation link");
-    }
+    validate_documentation_id(document_id)?;
 
     let (browser, handler_task, page, owns_browser) = open_dashboard(false).await?;
     let url = format!("{DOCUMENTATION_URL}/{document_id}");
@@ -1068,6 +1062,17 @@ pub async fn get_documentation(document_id: &str) -> Result<DocumentationRecord>
     let result = documentation_record_from_detail(document_id.to_string(), url, snapshot);
     finish(browser, handler_task, owns_browser).await?;
     Ok(result)
+}
+
+fn validate_documentation_id(document_id: &str) -> Result<()> {
+    if document_id.is_empty()
+        || !document_id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+    {
+        bail!("document_id must be the ID from a Fagbrev documentation link");
+    }
+    Ok(())
 }
 
 /// Validate a target before a write is allowed to reach the browser UI.
@@ -1147,31 +1152,57 @@ async fn fill_new_documentation_form(
     content: &str,
     target: &DocumentationTarget,
 ) -> Result<()> {
+    fill_documentation_form(page, title, content, Some(target), false).await
+}
+
+/// Fill the visible title/editor fields and, when requested, replace the
+/// currently selected competency-goal/delmål checkboxes.
+///
+/// `replacement_target = None` deliberately leaves the existing selection
+/// untouched. This is used by updates that only change title/content.
+async fn fill_documentation_form(
+    page: &chromiumoxide::Page,
+    title: &str,
+    content: &str,
+    replacement_target: Option<&DocumentationTarget>,
+    replace_targets: bool,
+) -> Result<()> {
     let title = serde_json::to_string(title)?;
     let content_html = serde_json::to_string(&plain_text_as_safe_html(content))?;
     let mut targets = Vec::new();
-    if let Some(goal) = &target.competency_goal {
-        targets.push(serde_json::json!({
-            "kind": "competency_goal",
-            "number": goal.number,
-            "title": goal.title,
-        }));
-    }
-    if let Some(delmal) = &target.delmal {
-        targets.push(serde_json::json!({
-            "kind": "delmal",
-            "goal_number": delmal.goal_number,
-            "number": delmal.number,
-            "title": delmal.title,
-        }));
+    if let Some(target) = replacement_target {
+        if let Some(goal) = &target.competency_goal {
+            targets.push(serde_json::json!({
+                "kind": "competency_goal",
+                "number": goal.number,
+                "title": goal.title,
+            }));
+        }
+        if let Some(delmal) = &target.delmal {
+            targets.push(serde_json::json!({
+                "kind": "delmal",
+                "goal_number": delmal.goal_number,
+                "number": delmal.number,
+                "title": delmal.title,
+            }));
+        }
     }
     let targets = serde_json::to_string(&targets)?;
+    let replace_targets = serde_json::to_string(&replace_targets)?;
 
     let result: UiMutationResult = page
         .evaluate(format!(
             r#"() => {{
                 const targets = {targets};
+                const replaceTargets = {replace_targets};
                 const normalize = value => (value || '').replace(/\\s+/g, ' ').trim();
+                if (replaceTargets) {{
+                    for (let attempt = 0; attempt < 12; attempt++) {{
+                        const more = Array.from(document.querySelectorAll('main button')).filter(button => /^Vis \\d+ til$/.test(normalize(button.innerText)));
+                        if (!more.length) break;
+                        more.forEach(button => button.click());
+                    }}
+                }}
                 const labels = Array.from(document.querySelectorAll('main label'));
                 const found = targets.map(target => ({{ target, label: null }}));
                 let currentGoal = null;
@@ -1211,6 +1242,9 @@ async fn fill_new_documentation_form(
                 editor.innerHTML = {content_html};
                 editor.dispatchEvent(new InputEvent('input', {{bubbles: true, inputType: 'insertText'}}));
                 editor.dispatchEvent(new Event('change', {{bubbles: true}}));
+                if (replaceTargets) {{
+                    document.querySelectorAll('main label .FCheckboxMarkerBody.FMarked').forEach(marker => marker.closest('label')?.click());
+                }}
                 found.forEach(item => item.label.click());
                 return {{ok: true, missing: [], message: null}};
             }}"#
@@ -1283,19 +1317,218 @@ pub async fn submit_documentation(
     result
 }
 
+async fn wait_for_edit_form(page: &chromiumoxide::Page) -> Result<()> {
+    for _ in 0..20 {
+        let ready: bool = page
+            .evaluate(
+                "() => !!document.querySelector('input[placeholder=\"Dokumentasjonavn\"]') && !!document.querySelector('main .ql-editor') && Array.from(document.querySelectorAll('main button')).some(button => button.type === 'submit' && (button.textContent || '').trim() === 'Lagre')",
+            )
+            .await?
+            .into_value()?;
+        if ready {
+            return Ok(());
+        }
+        sleep(Duration::from_millis(250)).await;
+    }
+    bail!("the documentation edit form did not finish loading")
+}
+
+/// Edit an existing documentation record through its visible editor.
+///
+/// The caller must provide the exact last-seen timestamp. The detail page is
+/// read first after confirmation and the edit page is only opened if that
+/// optimistic concurrency check still matches.
+pub async fn update_documentation(
+    document_id: &str,
+    title: &str,
+    content: &str,
+    replacement_target: Option<&DocumentationTarget>,
+    expected_updated_at: &str,
+    confirm: bool,
+) -> Result<DocumentationRecord> {
+    validate_documentation_id(document_id)?;
+    if !confirm {
+        bail!("update_documentation requires confirm=true before opening the edit form");
+    }
+    if title.trim().is_empty() {
+        bail!("title cannot be empty");
+    }
+    if content.trim().is_empty() {
+        bail!("content cannot be empty");
+    }
+    if expected_updated_at.trim().is_empty() {
+        bail!("expected_updated_at is required for safe documentation updates");
+    }
+    if let Some(target) = replacement_target {
+        validate_documentation_target(target)?;
+    }
+
+    let current = get_documentation(document_id).await?;
+    let current_updated_at = current
+        .updated_at
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("the documentation has no visible updated timestamp"))?;
+    if current_updated_at != expected_updated_at {
+        bail!(
+            "documentation changed since it was read: expected updated_at {:?}, current value is {:?}",
+            expected_updated_at,
+            current_updated_at
+        );
+    }
+
+    let (browser, handler_task, page, owns_browser) = open_dashboard(false).await?;
+    let url = format!("{DOCUMENTATION_URL}/{document_id}/rediger");
+    page.goto(&url).await?;
+    let result = async {
+        wait_for_edit_form(&page).await?;
+        fill_documentation_form(
+            &page,
+            title,
+            content,
+            replacement_target,
+            replacement_target.is_some(),
+        )
+        .await?;
+        let clicked: bool = page
+            .evaluate(
+                "() => { const button = Array.from(document.querySelectorAll('main button')).find(button => button.type === 'submit' && (button.textContent || '').trim() === 'Lagre'); if (!button) return false; button.click(); return true; }",
+            )
+            .await?
+            .into_value()?;
+        if !clicked {
+            bail!("the documentation save control was not exposed by the UI");
+        }
+        sleep(Duration::from_millis(750)).await;
+        Ok::<(), anyhow::Error>(())
+    }
+    .await;
+    finish(browser, handler_task, owns_browser).await?;
+    result?;
+
+    match get_documentation(document_id).await {
+        Ok(record) => Ok(record),
+        Err(_) => Ok(DocumentationRecord {
+            id: Some(document_id.to_string()),
+            url: Some(format!("{DOCUMENTATION_URL}/{document_id}")),
+            title: Some(title.to_string()),
+            content: Some(content.to_string()),
+            content_html: Some(plain_text_as_safe_html(content)),
+            target: replacement_target.cloned().unwrap_or_default(),
+            updated_at: Some(expected_updated_at.to_string()),
+            ..DocumentationRecord::default()
+        }),
+    }
+}
+
+/// Attempt to delete a draft only when the visible detail page exposes a
+/// clearly labelled delete control. Current Fagbrev pages do not expose one,
+/// so the normal confirmed result is an explicit unsupported response.
+pub async fn delete_documentation(
+    document_id: &str,
+    expected_status: DocumentationStatus,
+    expected_updated_at: &str,
+    confirm: bool,
+) -> Result<DeleteDocumentationResult> {
+    validate_documentation_id(document_id)?;
+    if expected_status != DocumentationStatus::Draft {
+        bail!("delete_documentation only permits expected_status=draft");
+    }
+    if expected_updated_at.trim().is_empty() {
+        bail!("expected_updated_at is required for safe documentation deletion");
+    }
+    if !confirm {
+        bail!("delete_documentation requires confirm=true before opening a documentation page");
+    }
+
+    let current = get_documentation(document_id).await?;
+    if current.status != DocumentationStatus::Draft {
+        bail!("refusing to delete a documentation record that is not a draft");
+    }
+    let current_updated_at = current
+        .updated_at
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("the documentation has no visible updated timestamp"))?;
+    if current_updated_at != expected_updated_at {
+        bail!(
+            "documentation changed since it was read: expected updated_at {:?}, current value is {:?}",
+            expected_updated_at,
+            current_updated_at
+        );
+    }
+
+    let (browser, handler_task, page, owns_browser) = open_dashboard(false).await?;
+    let url = format!("{DOCUMENTATION_URL}/{document_id}");
+    page.goto(&url).await?;
+    wait_for_text(&page, "Sist endret:").await?;
+    let result = async {
+        let delete_visible: bool = page
+            .evaluate(
+                "() => Array.from(document.querySelectorAll('main button, main a')).some(element => /^(Slett|Slett dokumentasjon)$/.test((element.textContent || '').replace(/\\s+/g, ' ').trim()))",
+            )
+            .await?
+            .into_value()?;
+        if !delete_visible {
+            return Ok(delete_unsupported_result(
+                document_id,
+                expected_status,
+                expected_updated_at,
+                current.status,
+            ));
+        }
+
+        let clicked: bool = page
+            .evaluate(
+                "() => { const control = Array.from(document.querySelectorAll('main button, main a')).find(element => /^(Slett|Slett dokumentasjon)$/.test((element.textContent || '').replace(/\\s+/g, ' ').trim())); if (!control) return false; control.click(); return true; }",
+            )
+            .await?
+            .into_value()?;
+        if !clicked {
+            bail!("the visible delete control could not be activated");
+        }
+        sleep(Duration::from_millis(750)).await;
+        Ok(DeleteDocumentationResult {
+            outcome: "deleted".to_string(),
+            confirmation_required: false,
+            would_mutate: true,
+            mutated: true,
+            document_id: document_id.to_string(),
+            expected_status,
+            expected_updated_at: expected_updated_at.to_string(),
+            status: Some(DocumentationStatus::Draft),
+            message: "The clearly labelled visible delete action was activated.".to_string(),
+        })
+    }
+    .await;
+    finish(browser, handler_task, owns_browser).await?;
+    result
+}
+
+fn delete_unsupported_result(
+    document_id: &str,
+    expected_status: DocumentationStatus,
+    expected_updated_at: &str,
+    current_status: DocumentationStatus,
+) -> DeleteDocumentationResult {
+    DeleteDocumentationResult {
+        outcome: "unsupported".to_string(),
+        confirmation_required: false,
+        would_mutate: false,
+        mutated: false,
+        document_id: document_id.to_string(),
+        expected_status,
+        expected_updated_at: expected_updated_at.to_string(),
+        status: Some(current_status),
+        message: "The current documentation page does not expose a clearly labelled delete action; nothing was changed.".to_string(),
+    }
+}
+
 /// Request approval using the visible `Send inn` action on a documentation
 /// detail page. If that action is absent, no click is attempted.
 pub async fn request_approval(document_id: &str, confirm: bool) -> Result<RequestApprovalResult> {
     if !confirm {
         bail!("request_approval requires confirm=true before opening a documentation page");
     }
-    if document_id.is_empty()
-        || !document_id
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
-    {
-        bail!("document_id must be the ID from a Fagbrev documentation link");
-    }
+    validate_documentation_id(document_id)?;
 
     let (browser, handler_task, page, owns_browser) = open_dashboard(false).await?;
     let url = format!("{DOCUMENTATION_URL}/{document_id}");
@@ -1567,7 +1800,7 @@ mod tests {
     use super::{
         DocumentationDetailSnapshot, DocumentationRowSnapshot, DocumentationTableReadiness,
         FeedbackSnapshot, HalfYearTaskSnapshot, PageSnapshot, dashboard_overview_from_snapshot,
-        documentation_record_from_detail, documentation_status_from_ui,
+        delete_unsupported_result, documentation_record_from_detail, documentation_status_from_ui,
         documentation_table_is_rendered, parse_documentation_rows,
         parse_expanded_goal_from_page_text, parse_feedback, parse_goals_from_page_text,
         parse_half_year_tasks, plain_text_as_safe_html, validate_documentation_target,
@@ -1847,5 +2080,42 @@ mod tests {
             .await
             .expect_err("unconfirmed approval must stop before browser access");
         assert!(approval_error.to_string().contains("confirm=true"));
+
+        let update_error = super::update_documentation(
+            "document-123",
+            "title",
+            "content",
+            None,
+            "11.09.2026",
+            false,
+        )
+        .await
+        .expect_err("unconfirmed update must stop before browser access");
+        assert!(update_error.to_string().contains("confirm=true"));
+
+        let delete_error = super::delete_documentation(
+            "document-123",
+            DocumentationStatus::Draft,
+            "11.09.2026",
+            false,
+        )
+        .await
+        .expect_err("unconfirmed delete must stop before browser access");
+        assert!(delete_error.to_string().contains("confirm=true"));
+    }
+
+    #[test]
+    fn unsupported_delete_result_is_structured_and_non_mutating() {
+        let result = delete_unsupported_result(
+            "draft-123",
+            DocumentationStatus::Draft,
+            "11.09.2026",
+            DocumentationStatus::Draft,
+        );
+
+        assert_eq!(result.outcome, "unsupported");
+        assert!(!result.would_mutate);
+        assert!(!result.mutated);
+        assert!(result.message.contains("clearly labelled delete action"));
     }
 }

@@ -13,8 +13,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::browser;
 use crate::data::{
-    DocumentationStatus, DocumentationTarget, DocumentationWritePreview, RequestApprovalResult,
-    SubmitDocumentationResult,
+    DeleteDocumentationResult, DocumentationStatus, DocumentationTarget,
+    DocumentationUpdatePreview, DocumentationWritePreview, RequestApprovalResult,
+    SubmitDocumentationResult, UpdateDocumentationResult,
 };
 
 #[derive(Debug, Clone)]
@@ -94,6 +95,38 @@ pub struct DocumentationListRequest {
 pub struct DocumentationRequest {
     /// The real document ID copied from a /l/dokumentasjon/{id} link.
     pub document_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct UpdateDocumentationRequest {
+    /// The real document ID copied from a /l/dokumentasjon/{id} link.
+    pub document_id: String,
+    /// The replacement title shown by the documentation editor.
+    pub title: String,
+    /// Plain text replacement content for the rich-text editor.
+    pub content: String,
+    /// If provided, replace all visible competency-goal/delmål selections.
+    /// Omit it to preserve the current target selection.
+    #[serde(default)]
+    pub replacement_target: Option<DocumentationTarget>,
+    /// Exact `updated_at` value returned by `get_documentation`.
+    pub expected_updated_at: String,
+    /// Must be true before opening the edit form and clicking `Lagre`.
+    #[serde(default)]
+    pub confirm: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DeleteDocumentationRequest {
+    /// The real document ID copied from a /l/dokumentasjon/{id} link.
+    pub document_id: String,
+    /// Must explicitly be `draft`; approved and in-review records are refused.
+    pub expected_status: DocumentationStatus,
+    /// Exact `updated_at` value returned by `get_documentation`.
+    pub expected_updated_at: String,
+    /// Must be true before inspecting for and activating a visible delete control.
+    #[serde(default)]
+    pub confirm: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -183,6 +216,68 @@ fn approval_preview(document_id: String) -> RequestApprovalResult {
         status: None,
         message: "Preview only. If the record exposes the visible Send inn action, confirm=true will click it to request approval. No browser page was opened.".to_string(),
     }
+}
+
+const UPDATE_WARNING: &str = "No edit page is opened and no browser data changes until confirm=true. The expected_updated_at guard must still match the visible record before saving.";
+const DELETE_WARNING: &str = "No documentation page is opened and nothing changes until confirm=true. Deletion is limited to drafts with an explicit status and updated_at guard; the current UI may report unsupported.";
+
+fn valid_documentation_id(document_id: &str) -> Result<()> {
+    if document_id.is_empty()
+        || !document_id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+    {
+        bail!("document_id must be the ID from a Fagbrev documentation link");
+    }
+    Ok(())
+}
+
+fn update_preview(request: &UpdateDocumentationRequest) -> Result<DocumentationUpdatePreview> {
+    valid_documentation_id(&request.document_id)?;
+    if request.title.trim().is_empty() {
+        bail!("title cannot be empty");
+    }
+    if request.content.trim().is_empty() {
+        bail!("content cannot be empty");
+    }
+    if request.expected_updated_at.trim().is_empty() {
+        bail!("expected_updated_at is required for safe documentation updates");
+    }
+    if let Some(target) = &request.replacement_target {
+        browser::validate_documentation_target(target)?;
+    }
+    Ok(DocumentationUpdatePreview {
+        operation: "update_documentation".to_string(),
+        confirmation_required: true,
+        would_mutate: true,
+        document_id: request.document_id.clone(),
+        title: request.title.clone(),
+        content: request.content.clone(),
+        replacement_target: request.replacement_target.clone(),
+        expected_updated_at: request.expected_updated_at.clone(),
+        warning: UPDATE_WARNING.to_string(),
+    })
+}
+
+fn delete_preview(request: &DeleteDocumentationRequest) -> Result<DeleteDocumentationResult> {
+    valid_documentation_id(&request.document_id)?;
+    if request.expected_status != DocumentationStatus::Draft {
+        bail!("delete_documentation only permits expected_status=draft");
+    }
+    if request.expected_updated_at.trim().is_empty() {
+        bail!("expected_updated_at is required for safe documentation deletion");
+    }
+    Ok(DeleteDocumentationResult {
+        outcome: "confirmation_required".to_string(),
+        confirmation_required: true,
+        would_mutate: true,
+        mutated: false,
+        document_id: request.document_id.clone(),
+        expected_status: request.expected_status,
+        expected_updated_at: request.expected_updated_at.clone(),
+        status: None,
+        message: DELETE_WARNING.to_string(),
+    })
 }
 
 #[tool_router]
@@ -436,6 +531,109 @@ impl FagbrevServer {
         }
     }
 
+    /// Edit an existing documentation entry only after explicit confirmation.
+    #[tool(
+        name = "update_documentation",
+        description = "Preview an existing Fagbrev.io documentation update by default. Only confirm=true may open /l/dokumentasjon/{id}/rediger and click the exact visible Lagre control. Requires the exact updated_at value from get_documentation; an optional replacement_target replaces visible goal/delmål selections."
+    )]
+    async fn update_documentation(
+        &self,
+        Parameters(request): Parameters<UpdateDocumentationRequest>,
+    ) -> CallToolResult {
+        let preview = match update_preview(&request) {
+            Ok(preview) => preview,
+            Err(error) => {
+                return CallToolResult::error(vec![rmcp::model::ContentBlock::text(
+                    error.to_string(),
+                )]);
+            }
+        };
+
+        if !request.confirm {
+            let response = UpdateDocumentationResult {
+                outcome: "confirmation_required".to_string(),
+                confirmation_required: true,
+                mutated: false,
+                preview,
+                record: None,
+                message: Some(UPDATE_WARNING.to_string()),
+            };
+            return CallToolResult::success(vec![rmcp::model::ContentBlock::text(
+                serde_json::to_string_pretty(&response).unwrap_or_else(|error| error.to_string()),
+            )]);
+        }
+
+        match browser::update_documentation(
+            &request.document_id,
+            &request.title,
+            &request.content,
+            request.replacement_target.as_ref(),
+            &request.expected_updated_at,
+            request.confirm,
+        )
+        .await
+        {
+            Ok(record) => {
+                let response = UpdateDocumentationResult {
+                    outcome: "updated".to_string(),
+                    confirmation_required: false,
+                    mutated: true,
+                    preview,
+                    record: Some(record),
+                    message: Some("The visible Lagre action was activated.".to_string()),
+                };
+                CallToolResult::success(vec![rmcp::model::ContentBlock::text(
+                    serde_json::to_string_pretty(&response)
+                        .unwrap_or_else(|error| error.to_string()),
+                )])
+            }
+            Err(error) => CallToolResult::error(vec![rmcp::model::ContentBlock::text(format!(
+                "Could not update documentation through the visible UI: {error:#}"
+            ))]),
+        }
+    }
+
+    /// Delete a draft only if the current UI exposes a clear delete control.
+    #[tool(
+        name = "delete_documentation",
+        description = "Preview a draft deletion by default. Requires expected_status=draft and the exact updated_at value from get_documentation. A confirmed call inspects the visible detail page and returns unsupported unless it exposes an exact Slett control; it never guesses a backend delete endpoint."
+    )]
+    async fn delete_documentation(
+        &self,
+        Parameters(request): Parameters<DeleteDocumentationRequest>,
+    ) -> CallToolResult {
+        let preview = match delete_preview(&request) {
+            Ok(preview) => preview,
+            Err(error) => {
+                return CallToolResult::error(vec![rmcp::model::ContentBlock::text(
+                    error.to_string(),
+                )]);
+            }
+        };
+
+        if !request.confirm {
+            return CallToolResult::success(vec![rmcp::model::ContentBlock::text(
+                serde_json::to_string_pretty(&preview).unwrap_or_else(|error| error.to_string()),
+            )]);
+        }
+
+        match browser::delete_documentation(
+            &request.document_id,
+            request.expected_status,
+            &request.expected_updated_at,
+            request.confirm,
+        )
+        .await
+        {
+            Ok(response) => CallToolResult::success(vec![rmcp::model::ContentBlock::text(
+                serde_json::to_string_pretty(&response).unwrap_or_else(|error| error.to_string()),
+            )]),
+            Err(error) => CallToolResult::error(vec![rmcp::model::ContentBlock::text(format!(
+                "Could not delete documentation through the visible UI: {error:#}"
+            ))]),
+        }
+    }
+
     /// Save a new documentation entry only after explicit confirmation.
     #[tool(
         name = "submit_documentation",
@@ -546,9 +744,11 @@ pub async fn serve() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        RequestApprovalRequest, SubmitDocumentationRequest, approval_preview, submit_preview,
+        DeleteDocumentationRequest, RequestApprovalRequest, SubmitDocumentationRequest,
+        UpdateDocumentationRequest, approval_preview, delete_preview, submit_preview,
+        update_preview,
     };
-    use crate::data::{CompetencyGoalReference, Delmal, DocumentationTarget};
+    use crate::data::{CompetencyGoalReference, Delmal, DocumentationStatus, DocumentationTarget};
 
     fn target() -> DocumentationTarget {
         DocumentationTarget {
@@ -602,5 +802,68 @@ mod tests {
             serde_json::from_str(r#"{"document_id":"document-123"}"#)
                 .expect("request should deserialize");
         assert!(!request.confirm);
+    }
+
+    #[test]
+    fn update_preview_requires_concurrency_guard_and_preserves_target_omission() {
+        let request = UpdateDocumentationRequest {
+            document_id: "document-123".to_string(),
+            title: "Updated title".to_string(),
+            content: "Updated content".to_string(),
+            replacement_target: None,
+            expected_updated_at: "03.06.2026".to_string(),
+            confirm: false,
+        };
+
+        let preview = update_preview(&request).expect("valid update request");
+        assert!(preview.confirmation_required);
+        assert!(preview.would_mutate);
+        assert!(preview.replacement_target.is_none());
+        assert!(preview.warning.contains("expected_updated_at"));
+
+        let mut missing_guard = request;
+        missing_guard.expected_updated_at.clear();
+        let error = update_preview(&missing_guard).expect_err("guard is mandatory");
+        assert!(error.to_string().contains("expected_updated_at"));
+    }
+
+    #[test]
+    fn update_preview_validates_replacement_target_without_browser_access() {
+        let request = UpdateDocumentationRequest {
+            document_id: "document-123".to_string(),
+            title: "Updated title".to_string(),
+            content: "Updated content".to_string(),
+            replacement_target: Some(target()),
+            expected_updated_at: "03.06.2026".to_string(),
+            confirm: false,
+        };
+
+        let preview = update_preview(&request).expect("target should validate");
+        assert_eq!(preview.replacement_target, request.replacement_target);
+    }
+
+    #[test]
+    fn delete_preview_is_draft_only_and_requires_explicit_version() {
+        let request = DeleteDocumentationRequest {
+            document_id: "document-123".to_string(),
+            expected_status: DocumentationStatus::Draft,
+            expected_updated_at: "11.09.2026".to_string(),
+            confirm: false,
+        };
+        let preview = delete_preview(&request).expect("valid draft deletion request");
+        assert_eq!(preview.outcome, "confirmation_required");
+        assert!(preview.would_mutate);
+        assert!(!preview.mutated);
+        assert!(preview.message.contains("nothing changes"));
+
+        let mut approved = request.clone();
+        approved.expected_status = DocumentationStatus::Approved;
+        let error = delete_preview(&approved).expect_err("approved records are protected");
+        assert!(error.to_string().contains("expected_status=draft"));
+
+        let mut missing_version = request;
+        missing_version.expected_updated_at.clear();
+        let error = delete_preview(&missing_version).expect_err("version is mandatory");
+        assert!(error.to_string().contains("expected_updated_at"));
     }
 }

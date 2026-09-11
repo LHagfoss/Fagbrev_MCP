@@ -40,13 +40,15 @@ The AI client keeps the conversation context. The server keeps the login session
 - `find_reusable_content`
 - `make_documentation_template`
 - `submit_documentation`
+- `update_documentation` (including optional target replacement)
+- `delete_documentation` (draft-only; currently reports unsupported when no clear UI action exists)
 - `request_approval`
 
 The competency goals and delmål are read-only learning-plan data. Documentation is the user-owned data that can be created or changed.
 
 ## Safe writing
 
-`submit_documentation` and `request_approval` are preview-only by default. They only use visible Fagbrev.io UI controls when called with `confirm: true`. The new-documentation form may create a blank draft when opened, so that warning is included in the preview.
+All documentation writes are preview-only by default. `submit_documentation`, `update_documentation`, `delete_documentation`, and `request_approval` require `confirm: true` before using visible Fagbrev.io controls. Updates and deletes also require an exact `updated_at` value from `get_documentation`; deletion is draft-only. The new-documentation form may create a blank draft when opened, so that warning is included in the create preview.
 
 ## Development
 
