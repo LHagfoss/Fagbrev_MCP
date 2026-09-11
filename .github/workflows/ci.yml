@@ -1,0 +1,93 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@1.98.0
+        with:
+          components: rustfmt, clippy
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Run tests
+        run: cargo test --locked
+      - name: Check release helper syntax and dry run
+        run: |
+          bash -n scripts/release.sh
+          bash scripts/release.sh package \
+            --target x86_64-unknown-linux-gnu \
+            --version v0.1.0 \
+            --dry-run
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@1.98.0
+        with:
+          components: clippy
+      - name: Run Clippy
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
+
+  build:
+    name: Release build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@1.98.0
+      - name: Build release binary
+        run: cargo build --locked --release
+
+  mcp-discovery:
+    name: MCP tools/list discovery
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@1.98.0
+      - name: Build release binary
+        run: cargo build --locked --release
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Discover MCP tools
+        run: |
+          npx --yes @modelcontextprotocol/inspector@2.6.0 \
+            --cli ./target/release/fagbrev-mcp mcp \
+            --method tools/list > inspector-tools.json
+          node -e '
+            const fs = require("fs");
+            const output = fs.readFileSync("inspector-tools.json", "utf8");
+            if (!output.includes("get_status") || !output.includes("tools")) {
+              console.error(output);
+              process.exit(1);
+            }
+          '
