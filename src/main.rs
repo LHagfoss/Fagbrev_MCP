@@ -3,6 +3,7 @@ mod cli;
 mod context;
 mod data;
 mod drafts;
+mod http;
 mod mcp;
 mod reuse;
 
@@ -28,6 +29,7 @@ async fn main() -> Result<()> {
         Command::Status => browser::status().await?,
         Command::Inspect => browser::inspect().await?,
         Command::Mcp => mcp::serve().await?,
+        Command::Http(options) => http::serve(options).await?,
         Command::Logout => browser::logout()?,
     }
 

@@ -6,10 +6,10 @@ This file explains how the project works under the hood. The public README is in
 
 The binary has two layers:
 
-- CLI layer: `login`, `status`, `inspect`, `mcp`, and `logout`.
+- CLI layer: `login`, `status`, `inspect`, `mcp`, `http`, and `logout`.
 - Adapter/MCP layer: `src/browser.rs` drives the authenticated Chrome profile and `src/mcp.rs` exposes typed `rmcp` tools.
 
-`cargo run -- mcp` starts an MCP server over `rmcp::transport::stdio`. MCP JSON-RPC uses stdin/stdout; logs must stay on stderr. There is no HTTP MCP endpoint.
+`cargo run -- mcp` starts an MCP server over `rmcp::transport::stdio`. MCP JSON-RPC uses stdin/stdout; logs must stay on stderr. `cargo run -- http` serves the same `FagbrevServer` tool router through rmcp's Streamable HTTP service at `/mcp`, using an in-memory session manager. HTTP binds to `127.0.0.1:3030` by default; `--host` and `--port` are explicit CLI overrides.
 
 The browser adapter uses `chromiumoxide` and a persistent, dedicated Chrome profile. `login` is headful so the user can authenticate. Normal reads run headless against the same profile. `FAGBREV_CDP_URL` and `FAGBREV_BROWSER_EXECUTABLE` are local development overrides.
 
