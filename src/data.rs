@@ -232,6 +232,9 @@ mod tests {
         assert_eq!(status.documentation_counts.in_review, Some(0));
         assert_eq!(status.documentation_counts.needing_correction, Some(1));
         assert_eq!(status.documentation_counts.approved, Some(14));
+
+        let encoded = serde_json::to_value(&status).expect("status should serialize");
+        assert_eq!(encoded["finished_percent"], serde_json::Value::Null);
     }
 
     #[test]
