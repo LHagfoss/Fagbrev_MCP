@@ -42,13 +42,15 @@ Use `save_draft` while writing, then review `get_draft`; a draft can later provi
 - `find_reusable_content`
 - `make_documentation_template`
 - `save_draft`, `list_drafts`, `get_draft`, `update_draft`, `delete_draft` (local-only)
-- `get_context_bundle` (bounded dashboard, plan, and documentation context)
+- `get_context_bundle` (bounded dashboard, plan, and documentation context; five summaries by default)
 - `submit_documentation`
 - `update_documentation` (including optional target replacement)
 - `delete_documentation` (draft-only; currently reports unsupported when no clear UI action exists)
 - `request_approval`
 
 The competency goals and delmål are read-only learning-plan data. Documentation is the user-owned data that can be created or changed.
+
+Read tools use bounded pages by default. Ask for a specific documentation page or limit when you need more records; context reads never load the whole archive implicitly.
 
 ## Safe writing
 
