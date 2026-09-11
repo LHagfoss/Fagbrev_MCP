@@ -105,14 +105,17 @@ pub async fn build(request: ContextRequest) -> Result<data::ContextBundle> {
             }
         }
     } else {
-        match browser::list_documentation(1, max_documents, None, None).await {
+        let page_size = browser::documentation_page_size_for_limit(max_documents);
+        match browser::list_documentation(1, page_size, None, None).await {
             Ok(page) => {
-                if page.total.is_some_and(|total| total > max_documents) {
+                if page.items.len() > max_documents as usize
+                    || page.total.is_some_and(|total| total > max_documents)
+                {
                     warnings.push(format!(
                         "Only the first {max_documents} documentation summaries were included; use document_ids for specific records."
                     ));
                 }
-                for record in page.items {
+                for record in page.items.into_iter().take(max_documents as usize) {
                     if let Some(url) = record.url.clone() {
                         source_urls.push(url);
                     }

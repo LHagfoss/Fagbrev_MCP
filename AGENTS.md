@@ -47,6 +47,10 @@ The server has no hidden conversation memory. It keeps the saved browser authent
 
 Read tools should return normalized models from `src/data.rs`, not raw browser HTML. Raw page text is for diagnostics and should eventually be limited to `inspect`.
 
+`list_competency_goals` validates that all 21 numbered goals were parsed. The page has rendered its status count both before and after a numbered heading, so the parser accepts either adjacent order and reports a clear error instead of returning an empty success when the UI is still loading or changes.
+
+Documentation table reads use the smallest page-size option exposed by Fagbrev (`6`, `12`, `18`, `24`, `100`, or `200`) that can satisfy a requested bounded context limit. `get_context_bundle` trims that page to its requested maximum; an explicit `list_documentation` page size remains available for callers that intentionally need a larger page.
+
 ### Write tools
 
 `submit_documentation` creates a documentation entry through the visible form. `update_documentation` edits an existing record through its visible editor and can replace its visible goal/delmål selection. `request_approval` activates the exact visible approval control when available. `delete_documentation` is draft-only and returns a structured `unsupported` result when the detail page does not expose an exact delete control.

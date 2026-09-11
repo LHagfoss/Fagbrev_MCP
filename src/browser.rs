@@ -23,6 +23,7 @@ const FAGBREV_URL: &str = "https://fagbrev.io/l";
 const PLAN_URL: &str = "https://fagbrev.io/l/laereplanmal";
 const DOCUMENTATION_URL: &str = "https://fagbrev.io/l/dokumentasjon";
 const LOGIN_WAIT: Duration = Duration::from_secs(10 * 60);
+const DOCUMENTATION_PAGE_SIZES: [u32; 6] = [6, 12, 18, 24, 100, 200];
 const HALF_YEAR_TASK_TITLES: [&str; 6] = [
     "Etikk, lovverk og yrkesutøvelse",
     "Kodeferdigheter og metode",
@@ -596,36 +597,96 @@ async fn half_year_tasks_snapshot(page: &chromiumoxide::Page) -> Result<Vec<Half
 }
 
 fn parse_goals_from_page_text(text: &str) -> Vec<CompetencyGoal> {
+    let lines = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    let headings = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            let (number, title) = numbered_heading(line)?;
+            (1..=21).contains(&number).then_some((index, number, title))
+        })
+        .collect::<Vec<_>>();
+    let count_before = headings
+        .iter()
+        .filter(|(index, _, _)| {
+            index
+                .checked_sub(1)
+                .and_then(|previous| lines[previous].parse::<u32>().ok())
+                .is_some()
+        })
+        .count();
+    let count_after = headings
+        .iter()
+        .filter(|(index, _, _)| {
+            lines
+                .get(index + 1)
+                .and_then(|line| line.parse::<u32>().ok())
+                .is_some()
+        })
+        .count();
+    let count_after_heading = count_after > count_before;
     let mut goals = Vec::new();
-    let mut pending_status = None;
 
-    for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
-        if let Ok(status_count) = line.parse::<u32>() {
-            pending_status = Some(status_count);
+    for (index, number, title) in headings {
+        // The plan has rendered the count both before and after the heading
+        // in different UI states. Looking only for a preceding count made
+        // the authenticated list silently become [].
+        let status_count = if count_after_heading {
+            lines
+                .get(index + 1)
+                .and_then(|line| line.parse::<u32>().ok())
+        } else {
+            index
+                .checked_sub(1)
+                .and_then(|previous| lines[previous].parse::<u32>().ok())
+        };
+        let Some(status_count) = status_count else {
+            continue;
+        };
+
+        if goals
+            .iter()
+            .any(|goal: &CompetencyGoal| goal.number == number)
+        {
             continue;
         }
-
-        let Some((number, title)) = line.split_once(". ") else {
-            continue;
-        };
-        let Ok(number) = number.parse::<u8>() else {
-            continue;
-        };
-        let Some(status_count) = pending_status.take() else {
-            continue;
-        };
-        if (1..=21).contains(&number) {
-            goals.push(CompetencyGoal {
-                number,
-                title: title.to_string(),
-                status_count,
-                id: None,
-                status: None,
-            });
-        }
+        goals.push(CompetencyGoal {
+            number,
+            title: title.to_string(),
+            status_count,
+            id: None,
+            status: None,
+        });
     }
 
     goals
+}
+
+fn goal_list_is_complete(goals: &[CompetencyGoal]) -> bool {
+    goals.len() == 21 && (1..=21).all(|number| goals.iter().any(|goal| goal.number == number))
+}
+
+fn goal_list_error(goals: &[CompetencyGoal], snapshot: &PageSnapshot) -> anyhow::Error {
+    anyhow::anyhow!(
+        "could not parse the 21 competency goals from the authenticated læreplan page: found {} numbered goals (page title: {:?}, url: {:?}); the Fagbrev UI may still be loading or its goal layout may have changed",
+        goals.len(),
+        snapshot.title,
+        snapshot.url
+    )
+}
+
+/// The smallest page-size option exposed by the documentation table that can
+/// satisfy a bounded read. The caller still trims the returned rows to its
+/// requested limit.
+pub(crate) fn documentation_page_size_for_limit(limit: u32) -> u32 {
+    DOCUMENTATION_PAGE_SIZES
+        .into_iter()
+        .find(|page_size| *page_size >= limit)
+        .unwrap_or(200)
 }
 
 fn numbered_heading(line: &str) -> Option<(u8, &str)> {
@@ -942,7 +1003,7 @@ pub async fn list_documentation(
     if page_number == 0 {
         bail!("page must be at least 1");
     }
-    if !matches!(page_size, 6 | 12 | 18 | 24 | 100 | 200) {
+    if !DOCUMENTATION_PAGE_SIZES.contains(&page_size) {
         bail!("page_size must be one of 6, 12, 18, 24, 100, or 200");
     }
 
@@ -1604,9 +1665,22 @@ pub async fn dashboard_overview() -> Result<DashboardOverview> {
 
 pub async fn list_competency_goals() -> Result<Vec<CompetencyGoal>> {
     let (browser, handler_task, page, owns_browser) = plan_page(false).await?;
-    let goals = parse_goals_from_page_text(&page_snapshot(&page).await?.text);
+    let result = async {
+        let mut snapshot = page_snapshot(&page).await?;
+        let mut goals = parse_goals_from_page_text(&snapshot.text);
+        for _ in 0..20 {
+            if goal_list_is_complete(&goals) {
+                return Ok(goals);
+            }
+            sleep(Duration::from_millis(250)).await;
+            snapshot = page_snapshot(&page).await?;
+            goals = parse_goals_from_page_text(&snapshot.text);
+        }
+        Err(goal_list_error(&goals, &snapshot))
+    }
+    .await;
     finish(browser, handler_task, owns_browser).await?;
-    Ok(goals)
+    result
 }
 
 pub async fn competency_goal(number: u8) -> Result<CompetencyGoalDetails> {
@@ -1800,10 +1874,12 @@ mod tests {
     use super::{
         DocumentationDetailSnapshot, DocumentationRowSnapshot, DocumentationTableReadiness,
         FeedbackSnapshot, HalfYearTaskSnapshot, PageSnapshot, dashboard_overview_from_snapshot,
-        delete_unsupported_result, documentation_record_from_detail, documentation_status_from_ui,
-        documentation_table_is_rendered, parse_documentation_rows,
-        parse_expanded_goal_from_page_text, parse_feedback, parse_goals_from_page_text,
-        parse_half_year_tasks, plain_text_as_safe_html, validate_documentation_target,
+        delete_unsupported_result, documentation_page_size_for_limit,
+        documentation_record_from_detail, documentation_status_from_ui,
+        documentation_table_is_rendered, goal_list_error, goal_list_is_complete,
+        parse_documentation_rows, parse_expanded_goal_from_page_text, parse_feedback,
+        parse_goals_from_page_text, parse_half_year_tasks, plain_text_as_safe_html,
+        validate_documentation_target,
     };
     use crate::data::{CompetencyGoalReference, Delmal, DocumentationStatus, DocumentationTarget};
 
@@ -1833,6 +1909,46 @@ mod tests {
         assert_eq!(goals.len(), 2);
         assert_eq!(goals[0].number, 1);
         assert_eq!(goals[1].status_count, 0);
+    }
+
+    #[test]
+    fn parses_goals_when_the_ui_renders_counts_after_headings() {
+        let goals = parse_goals_from_page_text(
+            "1. Planlegge, utvikle og dokumentere løsninger\n3\n2. Planlegge og vurdere brukervennlighet\n0",
+        );
+
+        assert_eq!(goals.len(), 2);
+        assert_eq!(goals[0].number, 1);
+        assert_eq!(goals[0].status_count, 3);
+        assert_eq!(goals[1].number, 2);
+        assert_eq!(goals[1].status_count, 0);
+    }
+
+    #[test]
+    fn detects_empty_or_partial_goal_results_instead_of_accepting_them() {
+        let snapshot = PageSnapshot {
+            title: "Fagbrev - Læreplanmål".to_string(),
+            url: "https://fagbrev.io/l/laereplanmal".to_string(),
+            text: "KOMPETANSEMÅL".to_string(),
+        };
+        let error = goal_list_error(&[], &snapshot);
+
+        assert!(!goal_list_is_complete(&[]));
+        assert!(
+            error
+                .to_string()
+                .contains("could not parse the 21 competency goals")
+        );
+    }
+
+    #[test]
+    fn chooses_the_smallest_supported_documentation_page_size_for_a_limit() {
+        assert_eq!(documentation_page_size_for_limit(1), 6);
+        assert_eq!(documentation_page_size_for_limit(6), 6);
+        assert_eq!(documentation_page_size_for_limit(7), 12);
+        assert_eq!(documentation_page_size_for_limit(20), 24);
+        assert_eq!(documentation_page_size_for_limit(200), 200);
+        assert_eq!(documentation_page_size_for_limit(201), 200);
     }
 
     #[test]
