@@ -42,6 +42,7 @@ Use `save_draft` while writing, then review `get_draft`; a draft can later provi
 
 - `list_documentation` and `get_documentation`
 - `list_feedback` and `get_feedback`
+- `list_attachments` and `download_attachment` (read-only; metadata and explicit local downloads)
 - `find_reusable_content`
 - `make_documentation_template`
 - `save_draft`, `list_drafts`, `get_draft`, `update_draft`, `delete_draft` (local-only)
@@ -54,6 +55,8 @@ Use `save_draft` while writing, then review `get_draft`; a draft can later provi
 The competency goals and delmål are read-only learning-plan data. Documentation is the user-owned data that can be created or changed.
 
 Read tools use bounded pages by default. Ask for a specific documentation page or limit when you need more records; context reads never load the whole archive implicitly.
+
+Attachment downloads use the visible Fagbrev control, are limited to 25 MiB, require an absolute output path, and refuse to overwrite unless `overwrite: true` is explicit. Some learning-plan or delmål pages may not expose independent attachment controls; those calls return a clear error.
 
 ## Safe writing
 
