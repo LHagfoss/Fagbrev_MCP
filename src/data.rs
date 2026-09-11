@@ -269,6 +269,46 @@ pub struct DocumentationTemplate {
     pub warnings: Vec<String>,
 }
 
+/// A side-effect-free preview returned before an external documentation write.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct DocumentationWritePreview {
+    pub operation: String,
+    pub confirmation_required: bool,
+    pub would_mutate: bool,
+    pub title: String,
+    pub content: String,
+    pub target: DocumentationTarget,
+    pub warning: String,
+}
+
+/// Result of the target-aware documentation save workflow.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct SubmitDocumentationResult {
+    pub outcome: String,
+    pub confirmation_required: bool,
+    pub mutated: bool,
+    pub preview: DocumentationWritePreview,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record: Option<DocumentationRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+/// Result of requesting approval for an existing documentation record.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct RequestApprovalResult {
+    pub outcome: String,
+    pub confirmation_required: bool,
+    pub would_mutate: bool,
+    pub mutated: bool,
+    pub document_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<DocumentationStatus>,
+    pub message: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

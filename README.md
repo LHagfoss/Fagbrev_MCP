@@ -88,13 +88,15 @@ Already implemented as a first read-only slice:
 - `get_documentation` — read-only detail content, status, attachments, and target summary
 - `find_reusable_content` — deterministic, explainable local text-overlap suggestions from existing documentation
 - `make_documentation_template` — local reviewable draft with clearly marked source content; never saves or submits
+- `submit_documentation` — preview by default; with `confirm: true`, fills the visible new-documentation form and clicks `Lagre`
+- `request_approval` — preview by default; with `confirm: true`, clicks the visible `Send inn` action when present
 
 Next read-only tools:
 
 - `list_half_year_tasks`
 - `get_half_year_task`
 
-The UI currently shows a status count on each competency goal and documentation state on submitted entries. The documentation target picker exposes 128 selectable competency-goal/delmål targets, with parent counts and delmål text but no independently exposed IDs in the rendered UI. The adapter therefore uses optional IDs/status fields and UI-local ordinals only; it must never invent Firebase identifiers.
+The UI currently shows a status count on each competency goal and documentation state on submitted entries. The documentation target picker exposes 128 selectable competency-goal/delmål targets, with parent counts and delmål text but no independently exposed IDs in the rendered UI. The adapter therefore uses optional IDs/status fields and UI-local ordinals only; it must never invent Firebase identifiers. Read-only delmål tools use the training-plan page because opening the new-documentation form has been observed to create a blank draft.
 
 ### Documentation workflow
 
@@ -103,10 +105,10 @@ Avoid separate tools that duplicate the same submission mechanism. First determi
 - `draft_documentation` — local draft only, with a target goal/delmål
 - `find_reusable_content` — compare existing user-written documentation against a target goal/delmål using local normalized-token overlap. Results include scores, matched terms, excerpts, and warnings; they are not semantic-equivalence claims.
 - `make_documentation_template` — create an editable local draft from selected source IDs, preserving clearly marked source references and review warnings. It does not call a save, upload, submit, or approval endpoint.
-- `submit_documentation` — submit a prepared draft after explicit confirmation
-- `request_approval` — ask for approval after explicit confirmation
+- `submit_documentation` — accepts a title, plain-text content, target competency goal/delmål, and `confirm: bool`. With confirmation omitted or false it returns a structured preview and does not open a browser page. With `confirm: true` it may open the new-entry form, fill the visible fields, select the requested targets, and click `Lagre`.
+- `request_approval` — accepts an existing documentation ID and `confirm: bool`. With confirmation omitted or false it returns a structured preview and does not open a browser page. With `confirm: true` it only clicks the exact visible `Send inn` button. If that action is absent, it returns `unsupported` without guessing an endpoint.
 
-The model should never silently submit documentation or request approval. Before a write, show the exact target, content, source documents reused, and side effect, then require confirmation in the MCP client. Reusing text should help structure the learner’s own evidence; it must not invent work completed or blindly duplicate claims.
+The model should never silently submit documentation or request approval. Before a write, show the exact target, content, source documents reused, and side effect, then require confirmation in the MCP client. Reusing text should help structure the learner’s own evidence; it must not invent work completed or blindly duplicate claims. The new-entry form itself may create a blank draft, so that side effect is included in the confirmation warning. Tests and preview calls do not open the form or click any mutating control.
 
 ## Suggested build steps
 
@@ -128,11 +130,11 @@ The model should never silently submit documentation or request approval. Before
    - Let the assistant turn the user’s description into a proposed documentation entry.
    - Store drafts locally and let the user edit them before submission.
 
-5. **Add confirmed writes**
-   - Implement one write at a time.
-   - Display a final preview before creating documentation.
-   - Re-read the result after submission and return the created item/status.
-   - Make approval requests a separate, explicit confirmation.
+5. **Use confirmed writes carefully**
+   - Call `submit_documentation` once without confirmation and review its preview.
+   - Only repeat it with `confirm: true` when the exact title, content, and target are correct.
+   - The current implementation uses visible UI controls only; it does not call Firebase or undocumented backend endpoints.
+   - Call `request_approval` separately and explicitly. If the visible `Send inn` action is not present, the tool reports that limitation.
 
 6. **Test safely**
    - Begin with read-only tools and fixture data.
@@ -184,4 +186,4 @@ This project handles apprenticeship records and potentially personal or employer
 
 ## Project status
 
-The read-only prototype can return the dashboard overview/status, list the 21 competency goals, read an expanded competency goal with parsed delmål, list/get delmål from the authenticated documentation target picker, and list/read documentation records. Local reusable-content matching and template composition are now implemented; external write actions remain a separate future milestone.
+The prototype can return the dashboard overview/status, list the 21 competency goals, read an expanded competency goal with parsed delmål, list/get delmål from the training-plan UI, and list/read documentation records. Local reusable-content matching and template composition are implemented. External writes are bounded behind `confirm: true`; no live save or approval action is performed by the test suite. The current UI exposes `Send inn` on draft detail pages; `request_approval` reports `unsupported` for records where that action is not visible.

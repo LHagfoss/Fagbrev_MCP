@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use rmcp::{
     ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -12,7 +12,10 @@ use rmcp::{
 use serde::{Deserialize, Serialize};
 
 use crate::browser;
-use crate::data::{DocumentationStatus, DocumentationTarget};
+use crate::data::{
+    DocumentationStatus, DocumentationTarget, DocumentationWritePreview, RequestApprovalResult,
+    SubmitDocumentationResult,
+};
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -104,6 +107,62 @@ pub struct DocumentationTemplateRequest {
     /// Optional instructions to place above the draft scaffold.
     #[serde(default)]
     pub extra_instructions: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SubmitDocumentationRequest {
+    /// The title shown for the new documentation entry.
+    pub title: String,
+    /// Plain text content. It is escaped before being placed in the rich-text editor.
+    pub content: String,
+    /// A competency goal, delmål, or matching pair of targets.
+    pub target: DocumentationTarget,
+    /// Must be true before the browser form is opened. Opening it may create a blank draft.
+    #[serde(default)]
+    pub confirm: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RequestApprovalRequest {
+    /// The real document ID copied from a Fagbrev documentation link.
+    pub document_id: String,
+    /// Must be true before the visible approval action is clicked.
+    #[serde(default)]
+    pub confirm: bool,
+}
+
+const NEW_FORM_WARNING: &str = "Opening the new documentation form may create a blank draft. No form is opened and no browser data is changed until confirm=true.";
+
+fn submit_preview(request: &SubmitDocumentationRequest) -> Result<DocumentationWritePreview> {
+    browser::validate_documentation_target(&request.target)?;
+    if request.title.trim().is_empty() {
+        bail!("title cannot be empty");
+    }
+    if request.content.trim().is_empty() {
+        bail!("content cannot be empty");
+    }
+    Ok(DocumentationWritePreview {
+        operation: "submit_documentation".to_string(),
+        confirmation_required: true,
+        would_mutate: true,
+        title: request.title.clone(),
+        content: request.content.clone(),
+        target: request.target.clone(),
+        warning: NEW_FORM_WARNING.to_string(),
+    })
+}
+
+fn approval_preview(document_id: String) -> RequestApprovalResult {
+    RequestApprovalResult {
+        outcome: "confirmation_required".to_string(),
+        confirmation_required: true,
+        would_mutate: true,
+        mutated: false,
+        document_id,
+        url: None,
+        status: None,
+        message: "Preview only. If the record exposes the visible Send inn action, confirm=true will click it to request approval. No browser page was opened.".to_string(),
+    }
 }
 
 #[tool_router]
@@ -292,6 +351,102 @@ impl FagbrevServer {
             Err(error) => format!("Could not make documentation template: {error:#}"),
         }
     }
+
+    /// Save a new documentation entry only after explicit confirmation.
+    #[tool(
+        name = "submit_documentation",
+        description = "Preview a new Fagbrev.io documentation entry by default. Only confirm=true may open the new-entry form and click Lagre; opening that form may itself create a blank draft. Uses visible UI controls only."
+    )]
+    async fn submit_documentation(
+        &self,
+        Parameters(request): Parameters<SubmitDocumentationRequest>,
+    ) -> CallToolResult {
+        let preview = match submit_preview(&request) {
+            Ok(preview) => preview,
+            Err(error) => {
+                return CallToolResult::error(vec![rmcp::model::ContentBlock::text(
+                    error.to_string(),
+                )]);
+            }
+        };
+
+        if !request.confirm {
+            let response = SubmitDocumentationResult {
+                outcome: "confirmation_required".to_string(),
+                confirmation_required: true,
+                mutated: false,
+                preview,
+                record: None,
+                message: Some(NEW_FORM_WARNING.to_string()),
+            };
+            return CallToolResult::success(vec![rmcp::model::ContentBlock::text(
+                serde_json::to_string_pretty(&response).unwrap_or_else(|error| error.to_string()),
+            )]);
+        }
+
+        match browser::submit_documentation(
+            &request.title,
+            &request.content,
+            &request.target,
+            request.confirm,
+        )
+        .await
+        {
+            Ok(record) => {
+                let response = SubmitDocumentationResult {
+                    outcome: "saved".to_string(),
+                    confirmation_required: false,
+                    mutated: true,
+                    preview,
+                    record: Some(record),
+                    message: Some("The visible Lagre action was activated.".to_string()),
+                };
+                CallToolResult::success(vec![rmcp::model::ContentBlock::text(
+                    serde_json::to_string_pretty(&response)
+                        .unwrap_or_else(|error| error.to_string()),
+                )])
+            }
+            Err(error) => CallToolResult::error(vec![rmcp::model::ContentBlock::text(format!(
+                "Could not save documentation through the visible UI: {error:#}"
+            ))]),
+        }
+    }
+
+    /// Request approval for an existing documentation record only after confirmation.
+    #[tool(
+        name = "request_approval",
+        description = "Preview an approval request by default. Only confirm=true may click the visible Fagbrev.io Send inn action; if it is not exposed, returns unsupported without guessing an endpoint."
+    )]
+    async fn request_approval(
+        &self,
+        Parameters(request): Parameters<RequestApprovalRequest>,
+    ) -> CallToolResult {
+        if request.document_id.is_empty()
+            || !request.document_id.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '-' | '_')
+            })
+        {
+            return CallToolResult::error(vec![rmcp::model::ContentBlock::text(
+                "document_id must be the ID from a Fagbrev documentation link",
+            )]);
+        }
+
+        if !request.confirm {
+            let response = approval_preview(request.document_id);
+            return CallToolResult::success(vec![rmcp::model::ContentBlock::text(
+                serde_json::to_string_pretty(&response).unwrap_or_else(|error| error.to_string()),
+            )]);
+        }
+
+        match browser::request_approval(&request.document_id, request.confirm).await {
+            Ok(response) => CallToolResult::success(vec![rmcp::model::ContentBlock::text(
+                serde_json::to_string_pretty(&response).unwrap_or_else(|error| error.to_string()),
+            )]),
+            Err(error) => CallToolResult::error(vec![rmcp::model::ContentBlock::text(format!(
+                "Could not request approval through the visible UI: {error:#}"
+            ))]),
+        }
+    }
 }
 
 #[tool_handler]
@@ -302,4 +457,66 @@ pub async fn serve() -> Result<()> {
     let service = server.serve(stdio()).await?;
     service.waiting().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        RequestApprovalRequest, SubmitDocumentationRequest, approval_preview, submit_preview,
+    };
+    use crate::data::{CompetencyGoalReference, Delmal, DocumentationTarget};
+
+    fn target() -> DocumentationTarget {
+        DocumentationTarget {
+            competency_goal: Some(CompetencyGoalReference {
+                number: 15,
+                title: Some("Feilsøke kode og rette feil".to_string()),
+                id: None,
+            }),
+            delmal: Some(Delmal {
+                goal_number: 15,
+                number: Some(1),
+                title: "Dokumentere virksomhetens rutiner for feilsøking".to_string(),
+                id: None,
+                status: None,
+                status_count: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn submit_preview_is_confirmation_gated_and_serializable() {
+        let request = SubmitDocumentationRequest {
+            title: "Feilsøking".to_string(),
+            content: "Jeg undersøkte og dokumenterte feilen.".to_string(),
+            target: target(),
+            confirm: false,
+        };
+
+        let preview = submit_preview(&request).expect("valid write request");
+        assert!(preview.confirmation_required);
+        assert!(preview.would_mutate);
+        assert!(preview.warning.contains("blank draft"));
+        let encoded = serde_json::to_value(&preview).expect("preview should serialize");
+        assert_eq!(encoded["target"]["delmal"]["goal_number"], 15);
+    }
+
+    #[test]
+    fn approval_preview_never_reports_mutation() {
+        let response = approval_preview("document-123".to_string());
+        assert!(response.confirmation_required);
+        assert!(response.would_mutate);
+        assert!(!response.mutated);
+        assert_eq!(response.document_id, "document-123");
+        let encoded = serde_json::to_value(response).expect("approval preview should serialize");
+        assert_eq!(encoded["outcome"], "confirmation_required");
+    }
+
+    #[test]
+    fn approval_request_defaults_to_preview() {
+        let request: RequestApprovalRequest =
+            serde_json::from_str(r#"{"document_id":"document-123"}"#)
+                .expect("request should deserialize");
+        assert!(!request.confirm);
+    }
 }
