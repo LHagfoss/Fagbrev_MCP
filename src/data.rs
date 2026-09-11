@@ -157,6 +157,10 @@ pub struct CompetencyGoalDetails {
     pub url: String,
     pub page_title: String,
     pub visible_text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_count: Option<u32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub delmal: Vec<Delmal>,
 }

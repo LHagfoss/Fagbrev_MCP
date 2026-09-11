@@ -35,6 +35,21 @@ pub struct GoalRequest {
     pub goal_number: u8,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DelmalListRequest {
+    /// Optional parent competency goal number. Omit to list delmål for all goals.
+    #[serde(default)]
+    pub goal_number: Option<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DelmalRequest {
+    /// Parent competency goal number, from 1 to 21.
+    pub goal_number: u8,
+    /// Ordinal within the parent goal. This is not a Firebase ID.
+    pub delmal_number: u16,
+}
+
 #[tool_router]
 impl FagbrevServer {
     /// Return the authenticated dashboard overview.
@@ -97,6 +112,35 @@ impl FagbrevServer {
             )]),
             Err(error) => CallToolResult::error(vec![rmcp::model::ContentBlock::text(format!(
                 "Could not read competency goal: {error:#}"
+            ))]),
+        }
+    }
+
+    /// List the selectable delmål/work activities exposed by the documentation target picker.
+    #[tool(
+        name = "list_delmal",
+        description = "List selectable Fagbrev.io delmål, optionally filtered by parent competency goal. IDs and statuses remain null unless the UI exposes them. Read-only."
+    )]
+    async fn list_delmal(&self, Parameters(request): Parameters<DelmalListRequest>) -> String {
+        match browser::list_delmal(request.goal_number).await {
+            Ok(delmal) => serde_json::to_string_pretty(&delmal)
+                .unwrap_or_else(|error| format!("Could not serialize delmål: {error}")),
+            Err(error) => format!("Could not read delmål: {error:#}"),
+        }
+    }
+
+    /// Return one selectable delmål by parent goal and UI ordinal.
+    #[tool(
+        name = "get_delmal",
+        description = "Read one Fagbrev.io delmål by its parent competency goal and ordinal. The ordinal is UI-local and is not an invented backend ID. Read-only."
+    )]
+    async fn get_delmal(&self, Parameters(request): Parameters<DelmalRequest>) -> CallToolResult {
+        match browser::get_delmal(request.goal_number, request.delmal_number).await {
+            Ok(delmal) => CallToolResult::success(vec![rmcp::model::ContentBlock::text(
+                serde_json::to_string_pretty(&delmal).unwrap_or_else(|error| error.to_string()),
+            )]),
+            Err(error) => CallToolResult::error(vec![rmcp::model::ContentBlock::text(format!(
+                "Could not read delmål: {error:#}"
             ))]),
         }
     }

@@ -81,7 +81,9 @@ Already implemented as a first read-only slice:
 - `get_dashboard_overview`
 - `get_status` — a focused status response for progress and documentation states
 - `list_competency_goals`
-- `get_competency_goal` — currently returns the expanded page text, including work activities
+- `get_competency_goal` — returns the selected goal plus conservatively parsed work activities as delmål
+- `list_delmal` — lists selectable delmål from the documentation target picker
+- `get_delmal` — returns one delmål using its parent goal and UI ordinal
 
 Next read-only tools:
 
@@ -91,7 +93,7 @@ Next read-only tools:
 - `list_half_year_tasks`
 - `get_half_year_task`
 
-The UI currently shows a status count on each competency goal and documentation state on submitted entries. A “delmål” appears to be suggested work activity text inside a competency goal, so the adapter must verify whether it has a real identifier/status of its own before treating it as an independently deliverable record.
+The UI currently shows a status count on each competency goal and documentation state on submitted entries. The documentation target picker exposes 128 selectable competency-goal/delmål targets, with parent counts and delmål text but no independently exposed IDs in the rendered UI. The adapter therefore uses optional IDs/status fields and UI-local ordinals only; it must never invent Firebase identifiers.
 
 ### Documentation workflow
 
@@ -181,4 +183,4 @@ This project handles apprenticeship records and potentially personal or employer
 
 ## Project status
 
-This repository currently contains the initial plan only. The next practical milestone is a read-only prototype that can return the dashboard overview and list the 21 competency goals from the user’s authenticated session.
+The read-only prototype can return the dashboard overview/status, list the 21 competency goals, read an expanded competency goal with parsed delmål, and list/get delmål from the authenticated documentation target picker. Documentation listing, local template matching, and external write actions remain separate future milestones.

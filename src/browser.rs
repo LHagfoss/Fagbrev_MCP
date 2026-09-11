@@ -12,10 +12,11 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::time::{sleep, timeout};
 
-use crate::data::{CompetencyGoal, CompetencyGoalDetails, DashboardOverview};
+use crate::data::{CompetencyGoal, CompetencyGoalDetails, DashboardOverview, Delmal};
 
 const FAGBREV_URL: &str = "https://fagbrev.io/l";
 const PLAN_URL: &str = "https://fagbrev.io/l/laereplanmal";
+const DOCUMENTATION_URL: &str = "https://fagbrev.io/l/dokumentasjon";
 const LOGIN_WAIT: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -251,6 +252,204 @@ fn parse_goals_from_page_text(text: &str) -> Vec<CompetencyGoal> {
     goals
 }
 
+fn numbered_heading(line: &str) -> Option<(u8, &str)> {
+    let (number, title) = line.split_once(". ")?;
+    let number = number.parse::<u8>().ok()?;
+    let title = title.trim();
+    (!title.is_empty()).then_some((number, title))
+}
+
+fn parse_picker_delmal_from_page_text(text: &str) -> Vec<Delmal> {
+    let mut result = Vec::new();
+    let mut goal_number = None;
+    let mut next_number = 0u16;
+
+    for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        if let Some((number, _title)) = numbered_heading(line)
+            && (1..=21).contains(&number)
+        {
+            goal_number = Some(number);
+            next_number = 0;
+            continue;
+        }
+
+        let Some(goal_number) = goal_number else {
+            continue;
+        };
+
+        if line.contains("Ditt utvalg") || line.starts_with("Knytt denne dokumentasjonen") {
+            break;
+        }
+
+        if line.starts_with("Kompetansemål og vurdering")
+            || line.starts_with("KOMPETANSEMÅL OG VURDERING")
+            || line.starts_with("Vis ")
+            || line.starts_with("av ")
+            || line.parse::<u32>().is_ok()
+        {
+            continue;
+        }
+
+        if line.starts_with("Halvårsoppgaver") || line.starts_with("HALVÅRSOPPGAVER") {
+            break;
+        }
+
+        next_number += 1;
+        result.push(Delmal {
+            goal_number,
+            number: Some(next_number),
+            title: line.to_string(),
+            id: None,
+            status: None,
+            status_count: None,
+        });
+    }
+
+    result
+}
+
+fn push_expanded_delmal(goal_number: u8, delmal: &mut Vec<Delmal>, current: &mut Option<String>) {
+    if let Some(title) = current.take()
+        && !title.ends_with(':')
+    {
+        delmal.push(Delmal {
+            goal_number,
+            number: Some(delmal.len() as u16 + 1),
+            title,
+            id: None,
+            status: None,
+            status_count: None,
+        });
+    }
+}
+
+fn parse_expanded_goal_from_page_text(
+    text: &str,
+    goal_number: u8,
+) -> (Option<String>, Option<u32>, Vec<Delmal>) {
+    let mut title = None;
+    let mut status_count = None;
+    let mut in_goal = false;
+    let mut delmal = Vec::new();
+    let mut current_title: Option<String> = None;
+    let mut pending_status_count = None;
+
+    for raw_line in text.lines().filter(|line| !line.trim().is_empty()) {
+        let line = raw_line.trim();
+        if let Some((number, heading)) = numbered_heading(line) {
+            if number == goal_number {
+                in_goal = true;
+                title = Some(heading.to_string());
+                status_count = pending_status_count.take();
+                current_title = None;
+                continue;
+            }
+            if in_goal && (1..=21).contains(&number) {
+                break;
+            }
+        }
+
+        if !in_goal {
+            if let Ok(value) = line.parse::<u32>() {
+                pending_status_count = Some(value);
+            }
+            continue;
+        }
+
+        if line.starts_with("Se tilknyttede dokumentasjoner")
+            || line == "Ny dokumentasjon"
+            || line.starts_with("Godkjent ")
+            || line.starts_with("Til vurdering")
+            || line.starts_with("Trenger endring")
+            || line.starts_with("Last ned ")
+        {
+            break;
+        }
+
+        if current_title.is_none() && line.parse::<u32>().is_ok() {
+            status_count = line.parse::<u32>().ok();
+            continue;
+        }
+
+        if let Some(activity) = line.strip_prefix("* ") {
+            push_expanded_delmal(goal_number, &mut delmal, &mut current_title);
+            let activity = activity.trim();
+            if !activity.ends_with(':') {
+                current_title = Some(activity.to_string());
+            }
+            continue;
+        }
+
+        if raw_line.chars().next().is_some_and(char::is_whitespace) {
+            if let Some(current) = current_title.as_mut() {
+                current.push(' ');
+                current.push_str(line);
+            }
+        } else {
+            // Unbulleted, non-indented text is a section heading or prose,
+            // not another part of the preceding work activity.
+            push_expanded_delmal(goal_number, &mut delmal, &mut current_title);
+        }
+    }
+
+    push_expanded_delmal(goal_number, &mut delmal, &mut current_title);
+
+    (title, status_count, delmal)
+}
+
+async fn documentation_picker_page(
+    headful: bool,
+) -> Result<(
+    Browser,
+    tokio::task::JoinHandle<()>,
+    chromiumoxide::Page,
+    bool,
+)> {
+    let session = open_dashboard(headful).await?;
+    let page = &session.2;
+    page.goto(DOCUMENTATION_URL).await?;
+    wait_for_text(page, "Skriv ny dokumentasjon").await?;
+
+    let opened: bool = page
+        .evaluate(
+            "() => { const button = Array.from(document.querySelectorAll('button')).find(button => (button.textContent || '').includes('Skriv ny dokumentasjon')); if (!button) return false; button.click(); return true; }",
+        )
+        .await?
+        .into_value()?;
+    if !opened {
+        finish(session.0, session.1, session.3).await?;
+        bail!("could not open the new documentation form");
+    }
+
+    wait_for_text(page, "Kompetansemål og vurdering").await?;
+    let opened_competency_section: bool = page
+        .evaluate(
+            "() => { const button = Array.from(document.querySelectorAll('button')).find(button => (button.textContent || '').includes('Kompetansemål og vurdering')); if (!button) return false; button.click(); return true; }",
+        )
+        .await?
+        .into_value()?;
+    if !opened_competency_section {
+        finish(session.0, session.1, session.3).await?;
+        bail!("could not open the competency-goal target picker");
+    }
+
+    wait_for_text(page, "valgbare").await?;
+    for _ in 0..8 {
+        let expanded: bool = page
+            .evaluate(
+                "() => { const buttons = Array.from(document.querySelectorAll('button')).filter(button => /^Vis \\d+ til$/.test((button.textContent || '').trim())); buttons.forEach(button => button.click()); return buttons.length > 0; }",
+            )
+            .await?
+            .into_value()?;
+        if !expanded {
+            break;
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+
+    Ok(session)
+}
+
 pub async fn dashboard_overview() -> Result<DashboardOverview> {
     let (browser, handler_task, page, owns_browser) = open_dashboard(false).await?;
     if !page
@@ -291,7 +490,7 @@ pub async fn competency_goal(number: u8) -> Result<CompetencyGoalDetails> {
     let (browser, handler_task, page, owns_browser) = plan_page(false).await?;
     let clicked: bool = page
         .evaluate(format!(
-            "() => {{ const button = Array.from(document.querySelectorAll('button')).find(button => /^{}\\.\\s/.test((button.textContent || '').replace(/\\s+/g, ' ').trim())); if (!button) return false; button.click(); return true; }}",
+            "() => {{ const button = Array.from(document.querySelectorAll('button')).find(button => new RegExp('(?:^|\\\\s){}\\\\.\\\\s').test((button.textContent || '').replace(/\\\\s+/g, ' ').trim())); if (!button) return false; button.click(); return true; }}",
             number
         ))
         .await?
@@ -304,15 +503,48 @@ pub async fn competency_goal(number: u8) -> Result<CompetencyGoalDetails> {
 
     sleep(Duration::from_millis(500)).await;
     let snapshot = page_snapshot(&page).await?;
+    let (title, status_count, delmal) = parse_expanded_goal_from_page_text(&snapshot.text, number);
     let result = CompetencyGoalDetails {
         number,
         url: snapshot.url,
         page_title: snapshot.title,
         visible_text: snapshot.text,
-        delmal: Vec::new(),
+        title,
+        status_count,
+        delmal,
     };
     finish(browser, handler_task, owns_browser).await?;
     Ok(result)
+}
+
+pub async fn list_delmal(goal_number: Option<u8>) -> Result<Vec<Delmal>> {
+    if let Some(number) = goal_number
+        && !(1..=21).contains(&number)
+    {
+        bail!("goal number must be between 1 and 21");
+    }
+
+    let (browser, handler_task, page, owns_browser) = documentation_picker_page(false).await?;
+    let result = parse_picker_delmal_from_page_text(&page_snapshot(&page).await?.text);
+    finish(browser, handler_task, owns_browser).await?;
+
+    Ok(result
+        .into_iter()
+        .filter(|delmal| goal_number.is_none_or(|number| delmal.goal_number == number))
+        .collect())
+}
+
+pub async fn get_delmal(goal_number: u8, delmal_number: u16) -> Result<Delmal> {
+    if !(1..=21).contains(&goal_number) {
+        bail!("goal number must be between 1 and 21");
+    }
+    let delmal = list_delmal(Some(goal_number))
+        .await?
+        .into_iter()
+        .find(|item| item.number == Some(delmal_number));
+    delmal.ok_or_else(|| {
+        anyhow::anyhow!("could not find delmål {delmal_number} for goal {goal_number}")
+    })
 }
 
 async fn finish(
@@ -398,7 +630,10 @@ pub fn logout() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{PageSnapshot, dashboard_overview_from_snapshot, parse_goals_from_page_text};
+    use super::{
+        PageSnapshot, dashboard_overview_from_snapshot, parse_expanded_goal_from_page_text,
+        parse_goals_from_page_text, parse_picker_delmal_from_page_text,
+    };
 
     #[test]
     fn parses_dashboard_progress_and_counts() {
@@ -426,5 +661,34 @@ mod tests {
         assert_eq!(goals.len(), 2);
         assert_eq!(goals[0].number, 1);
         assert_eq!(goals[1].status_count, 0);
+    }
+
+    #[test]
+    fn parses_picker_delmal_with_parent_and_ordinals_without_ids() {
+        let delmal = parse_picker_delmal_from_page_text(
+            "Kompetansemål og vurdering vg3 IT-utviklerfaget\n0\nav 128 valgbare\n1. Parent goal\n2\nav 2 delmål\nFirst activity\nSecond activity\n2. Another goal\n0\nav 1 delmål\nOnly activity\nHalvårsoppgaver og minifagprøve",
+        );
+
+        assert_eq!(delmal.len(), 3);
+        assert_eq!(delmal[0].goal_number, 1);
+        assert_eq!(delmal[0].number, Some(1));
+        assert_eq!(delmal[1].number, Some(2));
+        assert_eq!(delmal[2].goal_number, 2);
+        assert_eq!(delmal[2].id, None);
+    }
+
+    #[test]
+    fn parses_expanded_goal_bullets_and_joins_wrapped_text() {
+        let (title, status_count, delmal) = parse_expanded_goal_from_page_text(
+            "1\n1. Parent goal\nPlanlegging:\n * First activity continued\n   text\n * Second activity\nUtvikling:\n * Third activity\nGjennom hele prosessen kan lærlingen bruke interne rutiner.\nSe tilknyttede dokumentasjoner (1)\n2\n2. Next goal",
+            1,
+        );
+
+        assert_eq!(title.as_deref(), Some("Parent goal"));
+        assert_eq!(status_count, Some(1));
+        assert_eq!(delmal.len(), 3);
+        assert_eq!(delmal[0].number, Some(1));
+        assert_eq!(delmal[0].title, "First activity continued text");
+        assert_eq!(delmal[2].goal_number, 1);
     }
 }
