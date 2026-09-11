@@ -79,12 +79,12 @@ Prefer an official API or written integration permission from Fagbrev.io. Use br
 Already implemented as a first read-only slice:
 
 - `get_dashboard_overview`
+- `get_status` — a focused status response for progress and documentation states
 - `list_competency_goals`
 - `get_competency_goal` — currently returns the expanded page text, including work activities
 
 Next read-only tools:
 
-- `get_status` — a focused status response for progress and documentation states
 - `list_delmal` — list the suggested sub-goals/work activities for a competency goal
 - `get_delmal` — return one sub-goal with its parent competency goal
 - `list_documentation` — list submitted, approved, in-review, and correction-needed documentation

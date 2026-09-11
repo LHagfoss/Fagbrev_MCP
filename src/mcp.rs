@@ -50,6 +50,19 @@ impl FagbrevServer {
         }
     }
 
+    /// Return the focused status summary requested by the user.
+    #[tool(
+        name = "get_status",
+        description = "Read the current user's Fagbrev.io progress and documentation status summary. Read-only; unavailable percentages remain null."
+    )]
+    async fn get_status(&self) -> String {
+        match browser::dashboard_overview().await {
+            Ok(overview) => serde_json::to_string_pretty(&overview.status())
+                .unwrap_or_else(|error| format!("Could not serialize status: {error}")),
+            Err(error) => format!("Could not read status: {error:#}"),
+        }
+    }
+
     /// List the 21 competency goals and their current documentation counts.
     #[tool(
         name = "list_competency_goals",
