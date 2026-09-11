@@ -116,6 +116,11 @@ jobs:
       id-token: write
       attestations: write
     steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify-tag.outputs.tag }}
+          fetch-depth: 0
       - name: Download release packages
         uses: actions/download-artifact@v4
         with:
