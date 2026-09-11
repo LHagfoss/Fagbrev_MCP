@@ -48,6 +48,13 @@ struct DocumentationListSnapshot {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+struct DocumentationTableReadiness {
+    has_table: bool,
+    linked_rows: u32,
+    body_text: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 struct DocumentationDetailSnapshot {
     title: Option<String>,
     status_label: Option<String>,
@@ -671,15 +678,33 @@ async fn documentation_list_snapshot(
     .map_err(Into::into)
 }
 
+fn documentation_table_is_rendered(readiness: &DocumentationTableReadiness) -> bool {
+    if !readiness.has_table || readiness.linked_rows > 0 {
+        return readiness.has_table;
+    }
+
+    let lower = readiness.body_text.to_lowercase();
+    let has_total = lower
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .windows(2)
+        .any(|pair| pair[0] == "av" && pair[1].parse::<u32>().is_ok());
+    let has_empty_state = ["ingen data", "ingen dokumentasjoner", "ingen treff"]
+        .iter()
+        .any(|marker| lower.contains(marker));
+
+    has_total || has_empty_state
+}
+
 async fn wait_for_documentation_rows(page: &chromiumoxide::Page) -> Result<()> {
     for _ in 0..20 {
-        let count: u32 = page
+        let readiness: DocumentationTableReadiness = page
             .evaluate(
-                "() => document.querySelectorAll('table a[href^=\"/l/dokumentasjon/\"]').length",
+                "() => ({ has_table: !!document.querySelector('table'), linked_rows: document.querySelectorAll('table a[href^=\"/l/dokumentasjon/\"]').length, body_text: document.body?.innerText || '' })",
             )
             .await?
             .into_value()?;
-        if count > 0 {
+        if documentation_table_is_rendered(&readiness) {
             return Ok(());
         }
         sleep(Duration::from_millis(250)).await;
@@ -1048,10 +1073,11 @@ pub fn logout() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DocumentationDetailSnapshot, DocumentationRowSnapshot, PageSnapshot,
-        dashboard_overview_from_snapshot, documentation_record_from_detail,
-        documentation_status_from_ui, parse_documentation_rows, parse_expanded_goal_from_page_text,
-        parse_goals_from_page_text, parse_picker_delmal_from_page_text,
+        DocumentationDetailSnapshot, DocumentationRowSnapshot, DocumentationTableReadiness,
+        PageSnapshot, dashboard_overview_from_snapshot, documentation_record_from_detail,
+        documentation_status_from_ui, documentation_table_is_rendered, parse_documentation_rows,
+        parse_expanded_goal_from_page_text, parse_goals_from_page_text,
+        parse_picker_delmal_from_page_text,
     };
     use crate::data::DocumentationStatus;
 
@@ -1149,6 +1175,24 @@ mod tests {
             documentation_status_from_ui(Some("unknown"), None, None),
             DocumentationStatus::Unknown
         );
+    }
+
+    #[test]
+    fn accepts_a_rendered_empty_documentation_page() {
+        let readiness = DocumentationTableReadiness {
+            has_table: true,
+            linked_rows: 0,
+            body_text: "Søk\nViser\n0\nav 0".to_string(),
+        };
+
+        assert!(documentation_table_is_rendered(&readiness));
+        assert!(!documentation_table_is_rendered(
+            &DocumentationTableReadiness {
+                has_table: true,
+                linked_rows: 0,
+                body_text: "Søk\nLaster inn".to_string(),
+            }
+        ));
     }
 
     #[test]
