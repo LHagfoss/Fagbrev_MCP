@@ -14,9 +14,10 @@ use serde::{Deserialize, Serialize};
 use crate::browser;
 use crate::data::{
     DeleteDocumentationResult, DocumentationStatus, DocumentationTarget,
-    DocumentationUpdatePreview, DocumentationWritePreview, RequestApprovalResult,
-    SubmitDocumentationResult, UpdateDocumentationResult,
+    DocumentationUpdatePreview, DocumentationWritePreview, DraftDeleteResult, DraftWriteResult,
+    RequestApprovalResult, SubmitDocumentationResult, UpdateDocumentationResult,
 };
+use crate::{context, drafts};
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -184,7 +185,72 @@ pub struct RequestApprovalRequest {
     pub confirm: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SaveDraftRequest {
+    /// Omit to create a new local draft; provide an existing ID to update it.
+    #[serde(default)]
+    pub draft_id: Option<String>,
+    pub title: String,
+    pub content: String,
+    pub target: DocumentationTarget,
+    #[serde(default)]
+    pub source_documentation_ids: Vec<String>,
+    /// Required when draft_id is provided, to prevent overwriting a newer local version.
+    #[serde(default)]
+    pub expected_version: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DraftListRequest {
+    /// Maximum summaries to return. Defaults to 50 and is capped at 100.
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DraftRequest {
+    pub draft_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct UpdateDraftRequest {
+    pub draft_id: String,
+    pub title: String,
+    pub content: String,
+    pub target: DocumentationTarget,
+    #[serde(default)]
+    pub source_documentation_ids: Vec<String>,
+    /// Exact version returned by get_draft or save_draft.
+    pub expected_version: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ContextBundleRequest {
+    /// Optional competency goal to include with its delmål.
+    #[serde(default)]
+    pub goal_number: Option<u8>,
+    /// Optional explicit documentation IDs. Without this, only a small summary slice is read.
+    #[serde(default)]
+    pub document_ids: Option<Vec<String>>,
+    /// Maximum documentation records in the bundle. Defaults to 5, capped at 20.
+    #[serde(default)]
+    pub max_documents: Option<u32>,
+    /// Include content only for explicitly selected document_ids.
+    #[serde(default)]
+    pub include_document_content: bool,
+}
+
 const NEW_FORM_WARNING: &str = "Opening the new documentation form may create a blank draft. No form is opened and no browser data is changed until confirm=true.";
+
+fn json_success<T: Serialize>(value: &T) -> CallToolResult {
+    CallToolResult::success(vec![rmcp::model::ContentBlock::text(
+        serde_json::to_string_pretty(value).unwrap_or_else(|error| error.to_string()),
+    )])
+}
+
+fn json_error(error: impl std::fmt::Display) -> CallToolResult {
+    CallToolResult::error(vec![rmcp::model::ContentBlock::text(error.to_string())])
+}
 
 fn submit_preview(request: &SubmitDocumentationRequest) -> Result<DocumentationWritePreview> {
     browser::validate_documentation_target(&request.target)?;
@@ -528,6 +594,155 @@ impl FagbrevServer {
                 format!("Could not serialize documentation template: {error}")
             }),
             Err(error) => format!("Could not make documentation template: {error:#}"),
+        }
+    }
+
+    /// Create or update a draft stored only on this computer.
+    #[tool(
+        name = "save_draft",
+        description = "Create a new local-only documentation draft, or update an existing draft when draft_id and its exact expected_version are provided. Never contacts or changes Fagbrev.io."
+    )]
+    async fn save_draft(
+        &self,
+        Parameters(request): Parameters<SaveDraftRequest>,
+    ) -> CallToolResult {
+        let store = match drafts::DraftStore::from_app_data() {
+            Ok(store) => store,
+            Err(error) => return json_error(error),
+        };
+        let result = match request.draft_id {
+            Some(draft_id) => {
+                let Some(expected_version) = request.expected_version else {
+                    return json_error(
+                        "expected_version is required when save_draft updates an existing draft",
+                    );
+                };
+                store.update(
+                    &draft_id,
+                    request.title,
+                    request.content,
+                    request.target,
+                    request.source_documentation_ids,
+                    expected_version,
+                )
+            }
+            None => store.create(
+                request.title,
+                request.content,
+                request.target,
+                request.source_documentation_ids,
+            ),
+        };
+        match result {
+            Ok(draft) => json_success(&DraftWriteResult {
+                outcome: if draft.version == 1 {
+                    "created"
+                } else {
+                    "updated"
+                }
+                .to_string(),
+                local_only: true,
+                draft,
+                message: "Saved locally; nothing was sent to Fagbrev.io.".to_string(),
+            }),
+            Err(error) => json_error(error),
+        }
+    }
+
+    /// List local draft summaries without loading their content.
+    #[tool(
+        name = "list_drafts",
+        description = "List local-only documentation draft summaries. Content is omitted and the result is capped at 100 drafts. Never contacts Fagbrev.io."
+    )]
+    async fn list_drafts(&self, Parameters(request): Parameters<DraftListRequest>) -> String {
+        match drafts::DraftStore::from_app_data().and_then(|store| store.list(request.limit)) {
+            Ok(drafts) => serde_json::to_string_pretty(&drafts)
+                .unwrap_or_else(|error| format!("Could not serialize drafts: {error}")),
+            Err(error) => format!("Could not list local drafts: {error:#}"),
+        }
+    }
+
+    /// Read one complete local-only draft for review or future submission.
+    #[tool(
+        name = "get_draft",
+        description = "Read one local-only documentation draft, including target, source documentation IDs, content, version, and updated timestamp. Never contacts Fagbrev.io."
+    )]
+    async fn get_draft(&self, Parameters(request): Parameters<DraftRequest>) -> CallToolResult {
+        match drafts::DraftStore::from_app_data().and_then(|store| store.get(&request.draft_id)) {
+            Ok(draft) => json_success(&draft),
+            Err(error) => json_error(error),
+        }
+    }
+
+    /// Update a local-only draft with optimistic version protection.
+    #[tool(
+        name = "update_draft",
+        description = "Update a local-only documentation draft. Requires the exact version from get_draft or save_draft. Never contacts or changes Fagbrev.io."
+    )]
+    async fn update_draft(
+        &self,
+        Parameters(request): Parameters<UpdateDraftRequest>,
+    ) -> CallToolResult {
+        let result = drafts::DraftStore::from_app_data().and_then(|store| {
+            store.update(
+                &request.draft_id,
+                request.title,
+                request.content,
+                request.target,
+                request.source_documentation_ids,
+                request.expected_version,
+            )
+        });
+        match result {
+            Ok(draft) => json_success(&DraftWriteResult {
+                outcome: "updated".to_string(),
+                local_only: true,
+                draft,
+                message: "Updated locally; nothing was sent to Fagbrev.io.".to_string(),
+            }),
+            Err(error) => json_error(error),
+        }
+    }
+
+    /// Delete one local-only draft without touching Fagbrev.io.
+    #[tool(
+        name = "delete_draft",
+        description = "Immediately delete one validated local-only draft file. This cannot delete anything from Fagbrev.io."
+    )]
+    async fn delete_draft(&self, Parameters(request): Parameters<DraftRequest>) -> CallToolResult {
+        match drafts::DraftStore::from_app_data().and_then(|store| {
+            store.delete(&request.draft_id).map(|()| DraftDeleteResult {
+                outcome: "deleted".to_string(),
+                draft_id: request.draft_id,
+                local_only: true,
+                deleted: true,
+                message: "Deleted the local draft; Fagbrev.io was not contacted.".to_string(),
+            })
+        }) {
+            Ok(result) => json_success(&result),
+            Err(error) => json_error(error),
+        }
+    }
+
+    /// Assemble a fresh, explicitly bounded bundle for one model turn.
+    #[tool(
+        name = "get_context_bundle",
+        description = "Read a bounded context bundle containing dashboard/status, an optional competency goal with delmål, and limited documentation. Defaults to five summaries; document content requires explicit document_ids and include_document_content=true."
+    )]
+    async fn get_context_bundle(
+        &self,
+        Parameters(request): Parameters<ContextBundleRequest>,
+    ) -> CallToolResult {
+        match context::build(context::ContextRequest {
+            goal_number: request.goal_number,
+            document_ids: request.document_ids,
+            max_documents: request.max_documents,
+            include_document_content: request.include_document_content,
+        })
+        .await
+        {
+            Ok(bundle) => json_success(&bundle),
+            Err(error) => json_error(error),
         }
     }
 

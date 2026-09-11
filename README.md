@@ -22,7 +22,9 @@ The login profile is stored in your operating system's application-data folder, 
 4. Read tools open the dashboard and return structured JSON.
 5. Write tools show a preview first and need `confirm: true` before changing anything.
 
-The AI client keeps the conversation context. The server keeps the login session, but does not currently keep conversation memory. Tool calls pass IDs, targets, and draft content explicitly.
+The AI client keeps conversation context. The server also keeps explicitly saved drafts locally, but has no hidden conversation memory. Tool calls pass IDs, targets, and draft content explicitly.
+
+Use `save_draft` while writing, then review `get_draft`; a draft can later provide the title, content, and target to `submit_documentation`, which still requires a separate confirmation.
 
 ## Available tools
 
@@ -39,6 +41,8 @@ The AI client keeps the conversation context. The server keeps the login session
 - `list_feedback` and `get_feedback`
 - `find_reusable_content`
 - `make_documentation_template`
+- `save_draft`, `list_drafts`, `get_draft`, `update_draft`, `delete_draft` (local-only)
+- `get_context_bundle` (bounded dashboard, plan, and documentation context)
 - `submit_documentation`
 - `update_documentation` (including optional target replacement)
 - `delete_documentation` (draft-only; currently reports unsupported when no clear UI action exists)
