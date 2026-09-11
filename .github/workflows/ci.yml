@@ -52,6 +52,20 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --all-targets --all-features --locked -- -D warnings
 
+  dependency-check:
+    name: Dependency check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@1.98.0
+      - name: Validate locked dependency graph
+        run: |
+          cargo metadata --locked --format-version 1 --no-deps >/dev/null
+          cargo tree --locked --edges normal >/dev/null
+          git diff --exit-code -- Cargo.lock
+
   build:
     name: Release build
     runs-on: ubuntu-latest
