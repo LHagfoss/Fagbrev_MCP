@@ -2,6 +2,7 @@ mod browser;
 mod cli;
 mod data;
 mod mcp;
+mod reuse;
 
 use anyhow::Result;
 use clap::Parser;

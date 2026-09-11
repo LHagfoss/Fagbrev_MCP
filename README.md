@@ -86,6 +86,8 @@ Already implemented as a first read-only slice:
 - `get_delmal` — returns one delmål using its parent goal and UI ordinal
 - `list_documentation` — paginated/searchable documentation rows with real IDs and UI-derived status
 - `get_documentation` — read-only detail content, status, attachments, and target summary
+- `find_reusable_content` — deterministic, explainable local text-overlap suggestions from existing documentation
+- `make_documentation_template` — local reviewable draft with clearly marked source content; never saves or submits
 
 Next read-only tools:
 
@@ -99,8 +101,8 @@ The UI currently shows a status count on each competency goal and documentation 
 Avoid separate tools that duplicate the same submission mechanism. First determine whether Fagbrev attaches a new documentation entry to a competency goal, a delmål, or both. Then use one typed workflow:
 
 - `draft_documentation` — local draft only, with a target goal/delmål
-- `find_reusable_content` — compare existing user-written documentation against a target goal/delmål
-- `make_documentation_template` — create an editable draft from approved/relevant source content, preserving source references
+- `find_reusable_content` — compare existing user-written documentation against a target goal/delmål using local normalized-token overlap. Results include scores, matched terms, excerpts, and warnings; they are not semantic-equivalence claims.
+- `make_documentation_template` — create an editable local draft from selected source IDs, preserving clearly marked source references and review warnings. It does not call a save, upload, submit, or approval endpoint.
 - `submit_documentation` — submit a prepared draft after explicit confirmation
 - `request_approval` — ask for approval after explicit confirmation
 
@@ -182,4 +184,4 @@ This project handles apprenticeship records and potentially personal or employer
 
 ## Project status
 
-The read-only prototype can return the dashboard overview/status, list the 21 competency goals, read an expanded competency goal with parsed delmål, list/get delmål from the authenticated documentation target picker, and list/read documentation records. Local template matching and external write actions remain separate future milestones.
+The read-only prototype can return the dashboard overview/status, list the 21 competency goals, read an expanded competency goal with parsed delmål, list/get delmål from the authenticated documentation target picker, and list/read documentation records. Local reusable-content matching and template composition are now implemented; external write actions remain a separate future milestone.
