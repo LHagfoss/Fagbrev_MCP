@@ -41,15 +41,15 @@ The server is currently stateless between tool calls except for the saved browse
 - Learning plan: `list_competency_goals`, `get_competency_goal`, `list_delmal`, `get_delmal`
 - Documentation: `list_documentation`, `get_documentation`
 - Local composition: `find_reusable_content`, `make_documentation_template`
-- Planned/extended reads: half-year tasks and feedback tools are added in feature branches as their PRs land.
+- Half-year tasks and feedback are read-only tools exposed by the current main branch.
 
 Read tools should return normalized models from `src/data.rs`, not raw browser HTML. Raw page text is for diagnostics and should eventually be limited to `inspect`.
 
 ### Write tools
 
-`submit_documentation` creates a documentation entry through the visible form. `request_approval` activates the exact visible approval control when available.
+`submit_documentation` creates a documentation entry through the visible form. `update_documentation` edits an existing record through its visible editor and can replace its visible goal/delmål selection. `request_approval` activates the exact visible approval control when available. `delete_documentation` is draft-only and returns a structured `unsupported` result when the detail page does not expose an exact delete control.
 
-Both require an explicit `confirm: true`. With confirmation omitted or false, the MCP tool must validate the request and return a preview without opening a mutating page. Never use direct Firebase writes or undocumented backend calls.
+Every mutating workflow requires an explicit `confirm: true`. With confirmation omitted or false, the MCP tool must validate the request and return a preview without opening an edit, detail, or new-entry page. Updates and deletes require the exact `updated_at` value returned by a prior read; deletes additionally require `expected_status: draft`. Never use direct Firebase writes or undocumented backend calls.
 
 The Fagbrev new-documentation form has an important side effect: opening it can create a blank draft. Treat opening that form as a mutation and keep it behind the same confirmation boundary.
 

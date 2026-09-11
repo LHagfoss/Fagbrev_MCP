@@ -325,6 +325,50 @@ pub struct DocumentationWritePreview {
     pub warning: String,
 }
 
+/// A side-effect-free preview for editing an existing documentation record.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct DocumentationUpdatePreview {
+    pub operation: String,
+    pub confirmation_required: bool,
+    pub would_mutate: bool,
+    pub document_id: String,
+    pub title: String,
+    pub content: String,
+    /// `None` means preserve the existing visible target selection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replacement_target: Option<DocumentationTarget>,
+    pub expected_updated_at: String,
+    pub warning: String,
+}
+
+/// Result of editing an existing documentation record through the visible UI.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct UpdateDocumentationResult {
+    pub outcome: String,
+    pub confirmation_required: bool,
+    pub mutated: bool,
+    pub preview: DocumentationUpdatePreview,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record: Option<DocumentationRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+/// Result of the confirmation-gated documentation deletion attempt.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct DeleteDocumentationResult {
+    pub outcome: String,
+    pub confirmation_required: bool,
+    pub would_mutate: bool,
+    pub mutated: bool,
+    pub document_id: String,
+    pub expected_status: DocumentationStatus,
+    pub expected_updated_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<DocumentationStatus>,
+    pub message: String,
+}
+
 /// Result of the target-aware documentation save workflow.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct SubmitDocumentationResult {
