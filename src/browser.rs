@@ -242,6 +242,8 @@ fn parse_goals_from_page_text(text: &str) -> Vec<CompetencyGoal> {
                 number,
                 title: title.to_string(),
                 status_count,
+                id: None,
+                status: None,
             });
         }
     }
@@ -307,6 +309,7 @@ pub async fn competency_goal(number: u8) -> Result<CompetencyGoalDetails> {
         url: snapshot.url,
         page_title: snapshot.title,
         visible_text: snapshot.text,
+        delmal: Vec::new(),
     };
     finish(browser, handler_task, owns_browser).await?;
     Ok(result)
