@@ -79,8 +79,8 @@ bash scripts/release.sh check
 bash -n scripts/release.sh
 ```
 
-Pull requests to `main` run formatting, tests, Clippy, a locked release build, and
-MCP `tools/list` discovery. A release is created by pushing a matching `v*` tag
+Pull requests to `main` run formatting, tests, Clippy, dependency-lock resolution,
+a locked release build, and MCP `tools/list` discovery. A release is created by pushing a matching `v*` tag
 whose commit is reachable from `main`; the workflow publishes macOS Apple Silicon,
 Linux x86_64, and Windows x86_64 archives with `SHA256SUMS` and build provenance.
 
